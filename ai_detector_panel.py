@@ -427,6 +427,58 @@ def humanize():
     })
 
 
+@app.route("/api/humanize-until", methods=["POST"])
+def humanize_until():
+    """Iteratively humanize text until it hits a target AI % threshold."""
+    data = request.get_json()
+    text = data.get("text", "").strip()
+    target = float(data.get("target", 0))
+    passes = min(int(data.get("passes", 2)), 3)
+    max_iterations = min(int(data.get("max_iterations", 10)), 15)
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    if len(text) < 50:
+        return jsonify({"error": "Text too short. Need at least 50 characters."}), 400
+
+    iterations = []
+    current_text = text
+
+    for i in range(max_iterations):
+        # Humanize
+        current_text = current_text
+        for _ in range(passes):
+            current_text = humanize_text(current_text)
+
+        # Quick-check with ZeroGPT (fastest reliable detector)
+        result = check_zerogpt(current_text)
+        ai_pct = 100.0
+        if result["status"] == "success":
+            ai_pct = result["ai_percentage"]
+
+        iterations.append({
+            "iteration": i + 1,
+            "ai_percentage": ai_pct,
+            "verdict": result.get("verdict", _verdict(ai_pct)),
+            "word_count": len(current_text.split()),
+        })
+
+        # Check if we hit the target
+        if ai_pct <= target:
+            break
+
+    return jsonify({
+        "original": text,
+        "humanized": current_text,
+        "original_word_count": len(text.split()),
+        "humanized_word_count": len(current_text.split()),
+        "iterations": iterations,
+        "final_ai_percentage": iterations[-1]["ai_percentage"] if iterations else 100,
+        "target_reached": iterations[-1]["ai_percentage"] <= target if iterations else False,
+        "total_iterations": len(iterations),
+    })
+
+
 @app.route("/api/check", methods=["POST"])
 def check_all():
     """Run text through all available detectors concurrently."""
@@ -702,6 +754,44 @@ HTML_TEMPLATE = r'''
   }
   .toast.show { transform: translateY(0); opacity: 1; }
 
+  /* ─── Target Input ─── */
+  .target-group {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 6px 12px;
+  }
+  .target-group label {
+    font-size: 0.8rem; color: var(--text-dim); font-weight: 600;
+    white-space: nowrap;
+  }
+  .target-input {
+    width: 52px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 0.9rem;
+    padding: 4px 6px; text-align: center; outline: none;
+    font-family: monospace; font-weight: 700;
+  }
+  .target-input:focus { border-color: var(--accent); }
+  .target-group .unit { font-size: 0.8rem; color: var(--text-dim); }
+
+  /* ─── Iteration Log ─── */
+  .iter-log {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;
+  }
+  .iter-log.visible { display: block; }
+  .iter-log h4 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 10px; }
+  .iter-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .iter-row:last-child { border-bottom: none; }
+  .iter-num { color: var(--text-dim); font-family: monospace; min-width: 24px; }
+  .iter-bar-wrap { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .iter-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
+  .iter-pct { font-family: monospace; font-weight: 700; min-width: 45px; text-align: right; }
+  .iter-check { font-size: 1rem; min-width: 20px; text-align: center; }
+
   @media (max-width: 768px) {
     .split-panel { grid-template-columns: 1fr; }
     .results-grid { grid-template-columns: 1fr; }
@@ -731,7 +821,7 @@ HTML_TEMPLATE = r'''
         <div class="panel-label">📥 Original (AI-Generated)</div>
         <textarea id="hInput" placeholder="Paste your AI-generated text here..."></textarea>
         <div class="controls">
-          <button class="btn btn-primary" onclick="doHumanize('hInput','hOutput')">
+          <button class="btn btn-primary" onclick="doHumanizeUntil('hInput','hOutput','hIterLog','hMeta')">
             ✏️ Humanize
           </button>
           <button class="btn btn-ghost" onclick="document.getElementById('hInput').value=''">Clear</button>
@@ -739,6 +829,11 @@ HTML_TEMPLATE = r'''
             <button class="strength-btn active" data-passes="1" onclick="setStrength(this)">Light</button>
             <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
             <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
+          </div>
+          <div class="target-group">
+            <label>AI Limit</label>
+            <input type="number" class="target-input" id="hTarget" value="0" min="0" max="100">
+            <span class="unit">%</span>
           </div>
         </div>
       </div>
@@ -752,6 +847,7 @@ HTML_TEMPLATE = r'''
         </div>
       </div>
     </div>
+    <div class="iter-log" id="hIterLog"><h4>🔄 Iteration Log</h4><div class="iter-rows" id="hIterRows"></div></div>
     <div class="diff-highlight" id="hDiff" style="display:none"></div>
   </div>
 
@@ -818,10 +914,16 @@ HTML_TEMPLATE = r'''
           <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
           <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
         </div>
+        <div class="target-group">
+          <label>AI Limit</label>
+          <input type="number" class="target-input" id="wTarget" value="0" min="0" max="100">
+          <span class="unit">%</span>
+        </div>
       </div>
     </div>
 
     <div class="progress" id="wfProgress"><div class="fill"></div></div>
+    <div class="iter-log" id="wIterLog"><h4>🔄 Iteration Log</h4><div class="iter-rows" id="wIterRows"></div></div>
 
     <div class="card" id="wfHumanizedCard" style="display:none">
       <div class="panel-label">📤 Humanized Result</div>
@@ -935,39 +1037,76 @@ document.querySelectorAll('textarea').forEach(ta => {
   });
 });
 
-// ─── Humanize ───
-async function doHumanize(inputId, outputId) {
+// ─── Iteration log rendering ───
+function renderIterLog(logId, rowsId, iterations, target) {
+  const log = document.getElementById(logId);
+  const rows = document.getElementById(rowsId);
+  log.classList.add('visible');
+  rows.innerHTML = '';
+  iterations.forEach(it => {
+    const hit = it.ai_percentage <= target;
+    const color = it.ai_percentage <= 15 ? 'var(--green)' : it.ai_percentage <= 50 ? 'var(--yellow)' : 'var(--red)';
+    const row = document.createElement('div');
+    row.className = 'iter-row';
+    row.innerHTML = `
+      <span class="iter-num">#${it.iteration}</span>
+      <div class="iter-bar-wrap"><div class="iter-bar-fill" style="width:${it.ai_percentage}%;background:${color}"></div></div>
+      <span class="iter-pct" style="color:${color}">${it.ai_percentage}%</span>
+      <span class="iter-check">${hit ? '✅' : '🔄'}</span>
+    `;
+    rows.appendChild(row);
+  });
+}
+
+// ─── Humanize (with target loop) ───
+async function doHumanizeUntil(inputId, outputId, iterLogId, metaId) {
   const input = document.getElementById(inputId);
   const output = document.getElementById(outputId);
   const text = input.value.trim();
   if (!text) { toast('Paste some text first'); return; }
 
+  const targetEl = document.getElementById(inputId === 'hInput' ? 'hTarget' : 'wTarget');
+  const target = parseFloat(targetEl.value) || 0;
+
   const btn = event.target.closest('.btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Humanizing...';
 
+  // Reset iter log
+  const logEl = document.getElementById(iterLogId);
+  logEl.classList.remove('visible');
+
   try {
-    const resp = await fetch('/api/humanize', {
+    const resp = await fetch('/api/humanize-until', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ text, passes: currentPasses }),
+      body: JSON.stringify({ text, passes: currentPasses, target, max_iterations: 10 }),
     });
     const data = await resp.json();
     if (data.error) { toast(data.error); return; }
+
     output.value = data.humanized;
-    const metaId = outputId === 'hOutput' ? 'hMeta' : 'wMeta';
     updateMeta(metaId, data.original, data.humanized);
+
+    // Show iteration log
+    const rowsId = iterLogId.replace('Log', 'Rows');
+    renderIterLog(iterLogId, rowsId, data.iterations, target);
 
     // Show diff stats
     const diff = document.getElementById('hDiff');
-    if (diff && outputId === 'hOutput') {
-      const origWords = new Set(data.original.toLowerCase().split(/\s+/));
-      const newWords = new Set(data.humanized.toLowerCase().split(/\s+/));
-      const changed = [...newWords].filter(w => !origWords.has(w)).length;
+    if (diff && inputId === 'hInput') {
       diff.style.display = 'block';
-      diff.innerHTML = '🔄 <strong>' + changed + ' new word choices</strong> introduced · ' +
-        data.original_word_count + ' → ' + data.humanized_word_count + ' words · ' +
-        currentPasses + ' pass' + (currentPasses > 1 ? 'es' : '');
+      const status = data.target_reached ? '✅ Target reached!' : '⚠️ Target not reached — try Strong mode';
+      diff.innerHTML = status + ' · ' +
+        data.total_iterations + ' iteration' + (data.total_iterations > 1 ? 's' : '') + ' · ' +
+        'Final AI: <strong>' + data.final_ai_percentage + '%</strong> · ' +
+        data.original_word_count + ' → ' + data.humanized_word_count + ' words';
+    }
+
+    if (data.target_reached) {
+      toast('✅ Hit target: ' + data.final_ai_percentage + '% AI');
+    } else {
+      toast('⚠️ Best result: ' + data.final_ai_percentage + '% AI after ' + data.total_iterations + ' tries');
     }
   } catch(e) {
     toast('Error: ' + e.message);
@@ -1078,22 +1217,24 @@ async function runWorkflow() {
   const text = input.value.trim();
   if (!text) { toast('Paste some text first'); return; }
 
+  const target = parseFloat(document.getElementById('wTarget').value) || 0;
   const btn = document.getElementById('workflowBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Step 1: Humanizing...';
+  btn.innerHTML = '<span class="spinner"></span> Humanizing until ≤' + target + '% AI...';
 
   const prog = document.getElementById('wfProgress');
   prog.classList.add('active');
   document.getElementById('wfHumanizedCard').style.display = 'none';
   document.getElementById('wfSummary').classList.remove('visible');
   document.getElementById('wfResults').innerHTML = '';
+  document.getElementById('wIterLog').classList.remove('visible');
 
   try {
-    // Step 1: Humanize
-    const hResp = await fetch('/api/humanize', {
+    // Step 1: Humanize until target
+    const hResp = await fetch('/api/humanize-until', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({text, passes: currentPasses}),
+      body: JSON.stringify({text, passes: currentPasses, target, max_iterations: 10}),
     });
     const hData = await hResp.json();
     if (hData.error) { toast(hData.error); return; }
@@ -1102,8 +1243,16 @@ async function runWorkflow() {
     document.getElementById('wfHumanizedCard').style.display = 'block';
     updateMeta('wMeta', hData.original, hData.humanized);
 
-    // Step 2: Detect
-    btn.innerHTML = '<span class="spinner"></span> Step 2: Detecting...';
+    // Show iteration log
+    renderIterLog('wIterLog', 'wIterRows', hData.iterations, target);
+
+    const statusMsg = hData.target_reached
+      ? '✅ Target reached in ' + hData.total_iterations + ' iteration(s)!'
+      : '⚠️ Best: ' + hData.final_ai_percentage + '% after ' + hData.total_iterations + ' tries';
+    toast(statusMsg, 4000);
+
+    // Step 2: Full detection on final result
+    btn.innerHTML = '<span class="spinner"></span> Running all detectors...';
 
     const dResp = await fetch('/api/check', {
       method: 'POST',
