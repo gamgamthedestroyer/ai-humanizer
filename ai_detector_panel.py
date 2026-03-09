@@ -1,0 +1,1166 @@
+#!/usr/bin/env python3
+"""
+AI Humanizer + Detector Panel v2
+Humanize AI-generated text, then check it against multiple detectors.
+"""
+
+import json
+import re
+import random
+import time
+import threading
+import requests
+from flask import Flask, render_template_string, request, jsonify
+
+app = Flask(__name__)
+
+# ─── Text Humanizer Engine ────────────────────────────────────────────────────
+
+# Overused AI transition phrases → more natural replacements
+TRANSITION_SWAPS = {
+    r'\bFurthermore\b': lambda: random.choice(["On top of that", "What's more", "And", "Plus"]),
+    r'\bAdditionally\b': lambda: random.choice(["Also", "And", "Beyond that", "On top of this"]),
+    r'\bMoreover\b': lambda: random.choice(["And", "What's more", "On top of that", "Plus"]),
+    r'\bIn conclusion\b': lambda: random.choice(["All in all", "At the end of the day", "So really", "Looking at the big picture"]),
+    r'\bIn summary\b': lambda: random.choice(["To sum it up", "Pulling it all together", "So basically", "Bottom line"]),
+    r'\bIt is important to note that\b': lambda: random.choice(["Worth mentioning —", "The thing is,", "One key detail:", "Keep in mind that"]),
+    r'\bIt is worth noting that\b': lambda: random.choice(["Notably,", "Here's the thing —", "One thing to flag:", "Worth pointing out,"]),
+    r'\bConsequently\b': lambda: random.choice(["So", "Because of that", "As a result", "That meant"]),
+    r'\bNevertheless\b': lambda: random.choice(["Still", "Even so", "That said", "But"]),
+    r'\bNonetheless\b': lambda: random.choice(["Still", "Even so", "That said", "But even then"]),
+    r'\bTherefore\b': lambda: random.choice(["So", "Which means", "That's why", "Because of this"]),
+    r'\bThus\b': lambda: random.choice(["So", "Which means", "And so", "This way"]),
+    r'\bHowever\b': lambda: random.choice(["But", "That said", "Then again", "On the flip side"]),
+    r'\bSpecifically\b': lambda: random.choice(["In particular", "To be exact", "More precisely", "Namely"]),
+    r'\bUndoubtedly\b': lambda: random.choice(["Without question", "Clearly", "No doubt", "For sure"]),
+    r'\bSignificantly\b': lambda: random.choice(["Noticeably", "In a big way", "Quite a bit", "Considerably"]),
+    r'\bIn order to\b': lambda: random.choice(["To", "So as to", "For"]),
+    r'\bDue to the fact that\b': lambda: random.choice(["Because", "Since", "Given that"]),
+    r'\bIn the realm of\b': lambda: random.choice(["In", "When it comes to", "Within"]),
+    r'\bIt is essential to\b': lambda: random.choice(["You need to", "It's key to", "The important thing is to"]),
+    r'\bIn today\'s world\b': lambda: random.choice(["These days", "Right now", "Nowadays"]),
+    r'\bIn today\'s society\b': lambda: random.choice(["These days", "Nowadays", "In the world we live in now"]),
+    r'\bHas the potential to\b': lambda: random.choice(["Could", "Might", "Can"]),
+    r'\bA wide range of\b': lambda: random.choice(["All sorts of", "Many different", "A mix of", "Various"]),
+    r'\bPlays a crucial role\b': lambda: random.choice(["matters a lot", "is really important", "makes a big difference"]),
+    r'\bIt is evident that\b': lambda: random.choice(["Clearly,", "You can see that", "It's pretty clear that"]),
+    r'\bServes as a\b': lambda: random.choice(["works as a", "acts as a", "functions as a", "is basically a"]),
+}
+
+# Overused AI words → more natural alternatives
+WORD_SWAPS = {
+    r'\butilize\b': lambda: random.choice(["use", "rely on", "work with"]),
+    r'\butilized\b': lambda: random.choice(["used", "relied on", "worked with"]),
+    r'\butilizing\b': lambda: random.choice(["using", "relying on", "working with"]),
+    r'\butilization\b': lambda: random.choice(["use", "usage"]),
+    r'\bimplement\b': lambda: random.choice(["set up", "roll out", "put in place", "build"]),
+    r'\bimplemented\b': lambda: random.choice(["set up", "rolled out", "put in place", "built"]),
+    r'\bimplementation\b': lambda: random.choice(["setup", "rollout", "execution"]),
+    r'\bleverage\b': lambda: random.choice(["use", "take advantage of", "tap into"]),
+    r'\bleveraging\b': lambda: random.choice(["using", "taking advantage of", "tapping into"]),
+    r'\bfacilitate\b': lambda: random.choice(["help with", "make easier", "support"]),
+    r'\bfacilitated\b': lambda: random.choice(["helped with", "made easier", "supported"]),
+    r'\benhance\b': lambda: random.choice(["improve", "boost", "strengthen"]),
+    r'\benhanced\b': lambda: random.choice(["improved", "boosted", "strengthened"]),
+    r'\boptimize\b': lambda: random.choice(["improve", "fine-tune", "streamline"]),
+    r'\boptimized\b': lambda: random.choice(["improved", "fine-tuned", "streamlined"]),
+    r'\brobust\b': lambda: random.choice(["solid", "strong", "reliable"]),
+    r'\bseamless\b': lambda: random.choice(["smooth", "effortless", "clean"]),
+    r'\bseamlessly\b': lambda: random.choice(["smoothly", "without friction", "cleanly"]),
+    r'\bcomprehensive\b': lambda: random.choice(["thorough", "full", "complete", "in-depth"]),
+    r'\binnovative\b': lambda: random.choice(["creative", "fresh", "new", "original"]),
+    r'\bgroundbreaking\b': lambda: random.choice(["major", "game-changing", "huge"]),
+    r'\bcutting-edge\b': lambda: random.choice(["latest", "modern", "advanced", "state-of-the-art"]),
+    r'\bparadigm\b': lambda: random.choice(["model", "framework", "approach"]),
+    r'\bparadigm shift\b': lambda: random.choice(["major change", "big shift", "turning point"]),
+    r'\bsynergy\b': lambda: random.choice(["collaboration", "combined effort", "teamwork"]),
+    r'\bholistic\b': lambda: random.choice(["overall", "complete", "big-picture"]),
+    r'\bpivotal\b': lambda: random.choice(["key", "critical", "turning-point"]),
+    r'\bmultifaceted\b': lambda: random.choice(["complex", "layered", "many-sided"]),
+    r'\bdelve\b': lambda: random.choice(["dig into", "look at", "explore", "get into"]),
+    r'\bdelving\b': lambda: random.choice(["digging into", "looking at", "exploring"]),
+    r'\bmeticulous\b': lambda: random.choice(["careful", "detailed", "thorough"]),
+    r'\bmeticulously\b': lambda: random.choice(["carefully", "with care", "thoroughly"]),
+    r'\bplethora\b': lambda: random.choice(["ton", "lot", "bunch", "plenty"]),
+    r'\bmyriad\b': lambda: random.choice(["many", "countless", "all kinds of"]),
+    r'\blandscape\b': lambda: random.choice(["space", "scene", "world", "field"]),
+    r'\bfundamentally\b': lambda: random.choice(["at its core", "basically", "at a deep level"]),
+    r'\bunprecedented\b': lambda: random.choice(["never-before-seen", "unheard-of", "first-of-its-kind", "remarkable"]),
+    r'\btransformative\b': lambda: random.choice(["game-changing", "major", "powerful"]),
+    r'\brealm\b': lambda: random.choice(["area", "space", "world", "domain"]),
+    r'\bcommence\b': lambda: random.choice(["start", "begin", "kick off"]),
+    r'\bcommenced\b': lambda: random.choice(["started", "began", "kicked off"]),
+    r'\bterminate\b': lambda: random.choice(["end", "stop", "wrap up"]),
+    r'\bascertain\b': lambda: random.choice(["find out", "figure out", "determine"]),
+    r'\bendeavor\b': lambda: random.choice(["effort", "attempt", "try"]),
+    r'\bsubsequently\b': lambda: random.choice(["after that", "then", "later", "next"]),
+    r'\bnotwithstanding\b': lambda: random.choice(["despite", "even with", "regardless of"]),
+    r'\baforementioned\b': lambda: random.choice(["mentioned earlier", "noted above", "previous"]),
+    r'\bhenceforth\b': lambda: random.choice(["from now on", "going forward", "from here on"]),
+}
+
+# Human-style hedges and asides to inject
+HEDGES = [
+    " — at least from what I've seen —",
+    " (more or less)",
+    ", which is kind of the point,",
+    " — honestly —",
+    ", if we're being real,",
+    " (or something close to it)",
+    ", give or take,",
+    " — and this matters —",
+]
+
+INFORMALITIES = [
+    "The thing is, ",
+    "Honestly, ",
+    "Look, ",
+    "Here's the deal: ",
+    "Let's be real — ",
+    "Truth is, ",
+    "The reality is pretty straightforward: ",
+]
+
+SENTENCE_STARTERS_CASUAL = [
+    "And ",
+    "But ",
+    "So ",
+    "Now, ",
+    "Thing is, ",
+]
+
+
+def humanize_text(text):
+    """Apply humanization transforms to AI-generated text."""
+    # Step 1: Replace overused AI transitions
+    for pattern, replacement_fn in TRANSITION_SWAPS.items():
+        text = re.sub(pattern, lambda m: replacement_fn(), text, flags=re.IGNORECASE, count=1)
+
+    # Step 2: Replace overused AI vocabulary
+    for pattern, replacement_fn in WORD_SWAPS.items():
+        # Only replace ~70% of matches to keep some natural variation
+        def maybe_replace(m):
+            if random.random() < 0.7:
+                replacement = replacement_fn()
+                # Preserve capitalization
+                if m.group(0)[0].isupper():
+                    return replacement[0].upper() + replacement[1:]
+                return replacement
+            return m.group(0)
+        text = re.sub(pattern, maybe_replace, text, flags=re.IGNORECASE)
+
+    # Step 3: Split into sentences for structural manipulation
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    if len(sentences) < 2:
+        return text
+
+    new_sentences = []
+    for i, sent in enumerate(sentences):
+        sent = sent.strip()
+        if not sent:
+            continue
+
+        # Occasionally start with casual connector (15% chance, not first sentence)
+        if i > 0 and i < len(sentences) - 1 and random.random() < 0.15:
+            starter = random.choice(SENTENCE_STARTERS_CASUAL)
+            # Lowercase the first letter of the existing sentence
+            if sent and sent[0].isupper():
+                sent = starter + sent[0].lower() + sent[1:]
+
+        # Inject a hedge/aside into ~12% of longer sentences
+        if len(sent.split()) > 12 and random.random() < 0.12:
+            words = sent.split()
+            insert_pos = len(words) // 2
+            hedge = random.choice(HEDGES)
+            words.insert(insert_pos, hedge)
+            sent = ' '.join(words)
+
+        # Add informality opener to ~8% of sentences (not first)
+        if i > 1 and random.random() < 0.08 and not any(sent.startswith(s) for s in SENTENCE_STARTERS_CASUAL):
+            informal = random.choice(INFORMALITIES)
+            if sent and sent[0].isupper():
+                sent = informal + sent[0].lower() + sent[1:]
+
+        # Burstiness: occasionally split long sentences at commas
+        if len(sent.split()) > 18 and random.random() < 0.3:
+            comma_pos = sent.find(', ', len(sent) // 3)
+            if comma_pos > 0:
+                part1 = sent[:comma_pos] + '.'
+                part2 = sent[comma_pos + 2:]
+                if part2 and part2[0].islower():
+                    part2 = part2[0].upper() + part2[1:]
+                new_sentences.append(part1)
+                sent = part2
+
+        # Burstiness: occasionally merge short consecutive sentences
+        if (len(new_sentences) > 0 and
+            len(sent.split()) < 6 and
+            len(new_sentences[-1].split()) < 8 and
+            random.random() < 0.25):
+            prev = new_sentences[-1].rstrip('.')
+            sent_lower = sent[0].lower() + sent[1:] if sent else sent
+            new_sentences[-1] = prev + ' — ' + sent_lower
+            continue
+
+        new_sentences.append(sent)
+
+    # Step 4: Vary paragraph structure
+    # Join and re-split by paragraphs
+    result = ' '.join(new_sentences)
+
+    # Step 5: Clean up artifacts
+    result = re.sub(r'\s{2,}', ' ', result)
+    result = re.sub(r'\s([.,!?])', r'\1', result)
+    result = re.sub(r'\.{2,}', '.', result)
+
+    # Step 6: Randomly add a contraction or two
+    contraction_map = {
+        "It is ": ["It's ", 0.6],
+        "it is ": ["it's ", 0.6],
+        "That is ": ["That's ", 0.5],
+        "that is ": ["that's ", 0.5],
+        "There is ": ["There's ", 0.5],
+        "there is ": ["there's ", 0.5],
+        "does not ": ["doesn't ", 0.6],
+        "do not ": ["don't ", 0.6],
+        "can not ": ["can't ", 0.7],
+        "cannot ": ["can't ", 0.7],
+        "will not ": ["won't ", 0.6],
+        "should not ": ["shouldn't ", 0.5],
+        "would not ": ["wouldn't ", 0.5],
+        "could not ": ["couldn't ", 0.5],
+        "is not ": ["isn't ", 0.6],
+        "are not ": ["aren't ", 0.6],
+        "was not ": ["wasn't ", 0.5],
+        "were not ": ["weren't ", 0.5],
+        "have not ": ["haven't ", 0.5],
+        "has not ": ["hasn't ", 0.5],
+        "had not ": ["hadn't ", 0.5],
+        "we have ": ["we've ", 0.4],
+        "they have ": ["they've ", 0.4],
+        "I have ": ["I've ", 0.5],
+        "I am ": ["I'm ", 0.6],
+        "we are ": ["we're ", 0.5],
+        "they are ": ["they're ", 0.5],
+        "you are ": ["you're ", 0.5],
+    }
+    for formal, (contraction, prob) in contraction_map.items():
+        if random.random() < prob:
+            result = result.replace(formal, contraction, 1)
+
+    return result.strip()
+
+
+# ─── Detector Backends ────────────────────────────────────────────────────────
+
+def check_zerogpt(text):
+    """Check text against ZeroGPT's API."""
+    try:
+        url = "https://api.zerogpt.com/api/detect/detectText"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Origin": "https://www.zerogpt.com",
+            "Referer": "https://www.zerogpt.com/",
+        }
+        payload = {"input_text": text}
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        data = resp.json()
+
+        if data.get("success") or data.get("is_success"):
+            result = data.get("data", data)
+            ai_pct = result.get("fake_percentage", result.get("fakePercentage", None))
+            if ai_pct is None:
+                ai_pct = result.get("isHuman", 0)
+                ai_pct = 100 - float(ai_pct) if ai_pct else 0
+
+            return {
+                "detector": "ZeroGPT",
+                "status": "success",
+                "ai_percentage": round(float(ai_pct), 1),
+                "human_percentage": round(100 - float(ai_pct), 1),
+                "verdict": _verdict(float(ai_pct)),
+                "details": result.get("feedback", ""),
+            }
+        else:
+            return _manual_result("ZeroGPT", "https://www.zerogpt.com/",
+                                  data.get("message", "API limit reached"))
+    except Exception as e:
+        return _manual_result("ZeroGPT", "https://www.zerogpt.com/", str(e))
+
+
+def check_sapling(text):
+    """Check text against Sapling.ai's detector."""
+    try:
+        url = "https://sapling.ai/api/v1/aidetect"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Origin": "https://sapling.ai",
+            "Referer": "https://sapling.ai/ai-content-detector",
+        }
+        payload = {"text": text}
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+
+        if resp.status_code != 200:
+            return _manual_result("Sapling AI", "https://sapling.ai/ai-content-detector",
+                                  f"HTTP {resp.status_code}")
+
+        data = resp.json()
+        score = data.get("score", 0)
+        ai_pct = round(float(score) * 100, 1)
+
+        return {
+            "detector": "Sapling AI",
+            "status": "success",
+            "ai_percentage": ai_pct,
+            "human_percentage": round(100 - ai_pct, 1),
+            "verdict": _verdict(ai_pct),
+            "details": f"Confidence: {score:.3f}",
+        }
+    except Exception as e:
+        return _manual_result("Sapling AI", "https://sapling.ai/ai-content-detector", str(e))
+
+
+def check_writer(text):
+    """Writer.com detector - needs captcha, so manual."""
+    return _manual_result("Writer.com", "https://writer.com/ai-content-detector/",
+                          "Requires browser verification. Click to check manually.")
+
+
+def check_copyleaks(text):
+    """Copyleaks detector - needs auth, so manual."""
+    return _manual_result("Copyleaks", "https://copyleaks.com/ai-content-detector",
+                          "Requires login. Click to check manually.")
+
+
+def check_gptzero(text):
+    """GPTZero - try their demo endpoint."""
+    try:
+        url = "https://api.gptzero.me/v2/predict/text"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Origin": "https://gptzero.me",
+            "Referer": "https://gptzero.me/",
+        }
+        payload = {"document": text}
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+
+        if resp.status_code != 200:
+            return _manual_result("GPTZero", "https://gptzero.me/",
+                                  f"API returned {resp.status_code}. Check manually.")
+
+        data = resp.json()
+        doc = data.get("documents", [{}])[0] if data.get("documents") else {}
+        ai_prob = doc.get("completely_generated_prob",
+                    doc.get("average_generated_prob", 0))
+        ai_pct = round(float(ai_prob) * 100, 1)
+
+        return {
+            "detector": "GPTZero",
+            "status": "success",
+            "ai_percentage": ai_pct,
+            "human_percentage": round(100 - ai_pct, 1),
+            "verdict": _verdict(ai_pct),
+            "details": doc.get("classification", ""),
+        }
+    except Exception as e:
+        return _manual_result("GPTZero", "https://gptzero.me/", str(e))
+
+
+def check_quillbot(text):
+    """Quillbot AI detector - manual check."""
+    return _manual_result("Quillbot", "https://www.quillbot.com/ai-content-detector",
+                          "Requires browser. Click to check manually.")
+
+
+def _manual_result(name, url, msg):
+    return {
+        "detector": name,
+        "status": "manual",
+        "message": msg,
+        "url": url,
+    }
+
+
+def _verdict(ai_pct):
+    if ai_pct <= 15:
+        return "Human Written"
+    elif ai_pct <= 40:
+        return "Mostly Human"
+    elif ai_pct <= 60:
+        return "Mixed"
+    elif ai_pct <= 85:
+        return "Mostly AI"
+    else:
+        return "AI Generated"
+
+
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/humanize", methods=["POST"])
+def humanize():
+    """Humanize the provided text."""
+    data = request.get_json()
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    # Run humanization multiple passes for stronger effect
+    passes = data.get("passes", 1)
+    result = text
+    for _ in range(min(passes, 3)):
+        result = humanize_text(result)
+
+    return jsonify({
+        "original": text,
+        "humanized": result,
+        "original_word_count": len(text.split()),
+        "humanized_word_count": len(result.split()),
+    })
+
+
+@app.route("/api/check", methods=["POST"])
+def check_all():
+    """Run text through all available detectors concurrently."""
+    data = request.get_json()
+    text = data.get("text", "").strip()
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    if len(text) < 50:
+        return jsonify({"error": "Text too short. Need at least 50 characters."}), 400
+
+    results = []
+    threads = []
+    lock = threading.Lock()
+
+    detectors = [
+        check_zerogpt,
+        check_sapling,
+        check_gptzero,
+        check_writer,
+        check_quillbot,
+        check_copyleaks,
+    ]
+
+    def run_detector(fn):
+        result = fn(text)
+        with lock:
+            results.append(result)
+
+    for det in detectors:
+        t = threading.Thread(target=run_detector, args=(det,))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join(timeout=35)
+
+    order = {"success": 0, "manual": 1, "error": 2}
+    results.sort(key=lambda r: order.get(r.get("status"), 3))
+
+    successful = [r for r in results if r["status"] == "success"]
+    avg_ai = 0
+    if successful:
+        avg_ai = round(sum(r["ai_percentage"] for r in successful) / len(successful), 1)
+
+    return jsonify({
+        "results": results,
+        "summary": {
+            "total_checked": len(successful),
+            "total_detectors": len(results),
+            "avg_ai_percentage": avg_ai,
+            "avg_human_percentage": round(100 - avg_ai, 1),
+            "overall_verdict": _verdict(avg_ai),
+        }
+    })
+
+
+# ─── HTML Template ────────────────────────────────────────────────────────────
+
+HTML_TEMPLATE = r'''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Humanizer + Detector Panel</title>
+<style>
+  :root {
+    --bg: #08080d;
+    --surface: #111118;
+    --surface2: #191924;
+    --surface3: #22222f;
+    --border: #2a2a3a;
+    --border-bright: #3a3a55;
+    --text: #e4e4ef;
+    --text-dim: #7878a0;
+    --accent: #6c5ce7;
+    --accent2: #a29bfe;
+    --accent-glow: rgba(108, 92, 231, 0.25);
+    --green: #00b894;
+    --green-dim: rgba(0, 184, 148, 0.15);
+    --red: #e17055;
+    --red-dim: rgba(225, 112, 85, 0.15);
+    --yellow: #fdcb6e;
+    --yellow-dim: rgba(253, 203, 110, 0.15);
+    --cyan: #74b9ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ─── Layout ─── */
+  .app { max-width: 1400px; margin: 0 auto; padding: 24px 20px; }
+  .header { text-align: center; margin-bottom: 28px; }
+  .header h1 {
+    font-size: 1.8rem; font-weight: 800;
+    background: linear-gradient(135deg, #6c5ce7, #a29bfe, #74b9ff);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .header p { color: var(--text-dim); font-size: 0.9rem; margin-top: 4px; }
+
+  /* ─── Tabs ─── */
+  .tabs {
+    display: flex; gap: 4px;
+    background: var(--surface); border-radius: 12px;
+    padding: 4px; margin-bottom: 20px;
+    border: 1px solid var(--border);
+  }
+  .tab {
+    flex: 1; padding: 12px; text-align: center;
+    border-radius: 10px; cursor: pointer;
+    font-weight: 600; font-size: 0.95rem;
+    color: var(--text-dim); transition: all 0.3s;
+    border: none; background: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    background: var(--accent);
+    color: white;
+    box-shadow: 0 2px 12px var(--accent-glow);
+  }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* ─── Shared ─── */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px; margin-bottom: 18px;
+  }
+  textarea {
+    width: 100%; min-height: 180px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.88rem; padding: 14px; resize: vertical;
+    outline: none; transition: border-color 0.3s; line-height: 1.65;
+  }
+  textarea:focus { border-color: var(--accent); box-shadow: 0 0 15px var(--accent-glow); }
+  textarea::placeholder { color: var(--text-dim); }
+
+  .controls { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+
+  .btn {
+    padding: 10px 22px; border: none; border-radius: 9px;
+    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    transition: all 0.25s; display: inline-flex; align-items: center; gap: 7px;
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
+
+  .btn-primary {
+    background: linear-gradient(135deg, #6c5ce7, #a29bfe); color: white;
+    box-shadow: 0 3px 12px var(--accent-glow);
+  }
+  .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 5px 20px var(--accent-glow); }
+
+  .btn-green {
+    background: linear-gradient(135deg, #00b894, #55efc4); color: #111;
+    box-shadow: 0 3px 12px rgba(0,184,148,0.25);
+  }
+  .btn-green:hover:not(:disabled) { transform: translateY(-1px); }
+
+  .btn-ghost {
+    background: var(--surface2); color: var(--text-dim);
+    border: 1px solid var(--border); padding: 10px 16px;
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+
+  .meta { color: var(--text-dim); font-size: 0.82rem; margin-left: auto; font-family: monospace; }
+
+  /* ─── Humanizer ─── */
+  .split-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .panel-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .strength-selector { display: flex; gap: 6px; margin-top: 12px; }
+  .strength-btn {
+    padding: 6px 14px; border-radius: 7px; font-size: 0.8rem;
+    border: 1px solid var(--border); background: var(--surface2);
+    color: var(--text-dim); cursor: pointer; font-weight: 600;
+  }
+  .strength-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(108,92,231,0.1); }
+
+  .diff-highlight {
+    background: rgba(108, 92, 231, 0.08);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 0 10px 10px 0;
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+
+  /* ─── Progress ─── */
+  .progress { width: 100%; height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; display: none; margin-bottom: 18px; }
+  .progress.active { display: block; }
+  .progress .fill { height: 100%; width: 40%; background: linear-gradient(90deg, #6c5ce7, #74b9ff); border-radius: 2px; animation: slide 1.8s ease-in-out infinite; }
+  @keyframes slide { 0%{transform:translateX(-100%)} 100%{transform:translateX(350%)} }
+
+  /* ─── Summary ─── */
+  .summary { display: none; }
+  .summary.visible { display: block; }
+  .summary-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+  .verdict-badge {
+    padding: 5px 14px; border-radius: 16px;
+    font-weight: 700; font-size: 0.88rem;
+  }
+  .v-human { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,184,148,0.3); }
+  .v-mixed { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(253,203,110,0.3); }
+  .v-ai { background: var(--red-dim); color: var(--red); border: 1px solid rgba(225,112,85,0.3); }
+
+  .meter-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .meter-label { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px; }
+  .meter-label .pct { font-weight: 700; font-family: monospace; }
+  .meter-track { height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 4px; transition: width 0.8s ease; }
+  .meter-fill.human { background: linear-gradient(90deg, #00b894, #55efc4); }
+  .meter-fill.ai { background: linear-gradient(90deg, #e17055, #fab1a0); }
+
+  /* ─── Results Grid ─── */
+  .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin-bottom: 18px; }
+  .result-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; transition: all 0.3s; }
+  .result-card:hover { border-color: var(--border-bright); }
+  .rh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .rname { font-weight: 600; font-size: 0.98rem; }
+  .badge { font-size: 0.7rem; padding: 3px 9px; border-radius: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; }
+  .b-ok { background: var(--green-dim); color: var(--green); }
+  .b-err { background: var(--red-dim); color: var(--red); }
+  .b-man { background: var(--yellow-dim); color: var(--yellow); }
+  .b-load { background: rgba(108,92,231,0.15); color: var(--accent); }
+  .score-line { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px; }
+  .score-line .l { color: var(--text-dim); }
+  .score-line .v { font-weight: 600; font-family: monospace; }
+  .rbar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+  .rbar-fill { height: 100%; border-radius: 3px; transition: width 0.6s; }
+  .rverdict { font-size: 0.8rem; color: var(--text-dim); font-style: italic; }
+  .rmsg { color: var(--text-dim); font-size: 0.82rem; margin-top: 6px; line-height: 1.4; }
+  .rlink {
+    display: inline-block; margin-top: 8px; padding: 6px 14px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 7px; color: var(--accent); text-decoration: none;
+    font-size: 0.82rem; transition: all 0.3s;
+  }
+  .rlink:hover { border-color: var(--accent); }
+
+  /* ─── Manual Links ─── */
+  .manual-section { margin-top: 8px; }
+  .manual-section h4 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 12px; font-weight: 500; }
+  .manual-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .mbtn {
+    padding: 8px 16px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); text-decoration: none;
+    font-size: 0.85rem; cursor: pointer; transition: all 0.3s;
+  }
+  .mbtn:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 2px 10px var(--accent-glow); }
+
+  /* ─── Spinner ─── */
+  .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ─── Toast ─── */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--surface); border: 1px solid var(--accent);
+    border-radius: 10px; padding: 12px 20px;
+    color: var(--text); font-size: 0.88rem;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+    transform: translateY(80px); opacity: 0;
+    transition: all 0.35s; z-index: 999;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+
+  @media (max-width: 768px) {
+    .split-panel { grid-template-columns: 1fr; }
+    .results-grid { grid-template-columns: 1fr; }
+    .meter-row { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="header">
+    <h1>⚡ AI Humanizer + Detector</h1>
+    <p>Humanize your text, then verify it passes AI detection</p>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('humanize')">✏️ Humanize</button>
+    <button class="tab" onclick="switchTab('detect')">🔍 Detect</button>
+    <button class="tab" onclick="switchTab('workflow')">⚡ Full Workflow</button>
+  </div>
+
+  <!-- ═══ TAB 1: HUMANIZE ═══ -->
+  <div class="tab-content active" id="tab-humanize">
+    <div class="split-panel">
+      <div>
+        <div class="panel-label">📥 Original (AI-Generated)</div>
+        <textarea id="hInput" placeholder="Paste your AI-generated text here..."></textarea>
+        <div class="controls">
+          <button class="btn btn-primary" onclick="doHumanize('hInput','hOutput')">
+            ✏️ Humanize
+          </button>
+          <button class="btn btn-ghost" onclick="document.getElementById('hInput').value=''">Clear</button>
+          <div class="strength-selector">
+            <button class="strength-btn active" data-passes="1" onclick="setStrength(this)">Light</button>
+            <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
+            <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="panel-label">📤 Humanized Output</div>
+        <textarea id="hOutput" placeholder="Humanized text will appear here..." readonly></textarea>
+        <div class="controls">
+          <button class="btn btn-ghost" onclick="copyField('hOutput')">📋 Copy</button>
+          <button class="btn btn-ghost" onclick="sendToDetect('hOutput')">🔍 Send to Detector →</button>
+          <span class="meta" id="hMeta"></span>
+        </div>
+      </div>
+    </div>
+    <div class="diff-highlight" id="hDiff" style="display:none"></div>
+  </div>
+
+  <!-- ═══ TAB 2: DETECT ═══ -->
+  <div class="tab-content" id="tab-detect">
+    <div class="card">
+      <textarea id="dInput" placeholder="Paste text to check against AI detectors...&#10;&#10;Min 50 characters."></textarea>
+      <div class="controls">
+        <button class="btn btn-primary" id="detectBtn" onclick="runDetection('dInput')">
+          🔍 Check All Detectors
+        </button>
+        <button class="btn btn-ghost" onclick="document.getElementById('dInput').value=''">Clear</button>
+        <button class="btn btn-ghost" onclick="copyField('dInput')">📋 Copy</button>
+        <span class="meta" id="dMeta"></span>
+      </div>
+    </div>
+
+    <div class="progress" id="detectProgress"><div class="fill"></div></div>
+    <div class="summary card" id="detectSummary">
+      <div class="summary-row">
+        <h3 style="font-size:1.05rem">Aggregate Results</h3>
+        <span class="verdict-badge" id="dVerdict"></span>
+      </div>
+      <div class="meter-row">
+        <div>
+          <div class="meter-label"><span>🧑 Human</span><span class="pct" id="dHumanPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill human" id="dHumanBar" style="width:0%"></div></div>
+        </div>
+        <div>
+          <div class="meter-label"><span>🤖 AI</span><span class="pct" id="dAiPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill ai" id="dAiBar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="results-grid" id="detectResults"></div>
+
+    <div class="manual-section card">
+      <h4>🔗 Manual Check — copies text & opens detector</h4>
+      <div class="manual-grid">
+        <a class="mbtn" onclick="openManual('dInput','https://www.zerogpt.com/')">ZeroGPT ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://gptzero.me/')">GPTZero ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://www.quillbot.com/ai-content-detector')">Quillbot ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://originality.ai/')">Originality.ai ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://undetectable.ai/')">Undetectable.ai ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TAB 3: FULL WORKFLOW ═══ -->
+  <div class="tab-content" id="tab-workflow">
+    <div class="card">
+      <div class="panel-label">📥 Paste AI Text → Humanize → Detect (one click)</div>
+      <textarea id="wInput" placeholder="Paste your AI-generated text here...&#10;This will humanize it and then run it through all detectors automatically."></textarea>
+      <div class="controls">
+        <button class="btn btn-green" id="workflowBtn" onclick="runWorkflow()">
+          ⚡ Humanize & Detect
+        </button>
+        <button class="btn btn-ghost" onclick="document.getElementById('wInput').value=''">Clear</button>
+        <div class="strength-selector">
+          <button class="strength-btn active" data-passes="1" onclick="setStrength(this)">Light</button>
+          <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
+          <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="progress" id="wfProgress"><div class="fill"></div></div>
+
+    <div class="card" id="wfHumanizedCard" style="display:none">
+      <div class="panel-label">📤 Humanized Result</div>
+      <textarea id="wOutput" readonly style="min-height:120px"></textarea>
+      <div class="controls">
+        <button class="btn btn-ghost" onclick="copyField('wOutput')">📋 Copy</button>
+        <span class="meta" id="wMeta"></span>
+      </div>
+    </div>
+
+    <div class="summary card" id="wfSummary">
+      <div class="summary-row">
+        <h3 style="font-size:1.05rem">Detection Results</h3>
+        <span class="verdict-badge" id="wVerdict"></span>
+      </div>
+      <div class="meter-row">
+        <div>
+          <div class="meter-label"><span>🧑 Human</span><span class="pct" id="wHumanPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill human" id="wHumanBar" style="width:0%"></div></div>
+        </div>
+        <div>
+          <div class="meter-label"><span>🤖 AI</span><span class="pct" id="wAiPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill ai" id="wAiBar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="results-grid" id="wfResults"></div>
+
+    <div class="manual-section card">
+      <h4>🔗 Manual Check — copies humanized text & opens detector</h4>
+      <div class="manual-grid">
+        <a class="mbtn" onclick="openManual('wOutput','https://www.zerogpt.com/')">ZeroGPT ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://gptzero.me/')">GPTZero ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://www.quillbot.com/ai-content-detector')">Quillbot ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://originality.ai/')">Originality.ai ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://undetectable.ai/')">Undetectable.ai ↗</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let currentPasses = 1;
+
+// ─── Tab switching ───
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ─── Helpers ───
+function toast(msg, ms=2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), ms);
+}
+
+function copyField(id) {
+  const text = document.getElementById(id).value.trim();
+  if (!text) { toast('Nothing to copy'); return; }
+  navigator.clipboard.writeText(text);
+  toast('✓ Copied to clipboard');
+}
+
+function openManual(inputId, url) {
+  const text = document.getElementById(inputId).value.trim();
+  if (text) { navigator.clipboard.writeText(text); toast('✓ Text copied — paste on detector site'); }
+  window.open(url, '_blank');
+}
+
+function setStrength(el) {
+  el.closest('.strength-selector').querySelectorAll('.strength-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  currentPasses = parseInt(el.dataset.passes);
+}
+
+function sendToDetect(outputId) {
+  const text = document.getElementById(outputId).value.trim();
+  if (!text) { toast('Nothing to send'); return; }
+  document.getElementById('dInput').value = text;
+  // Switch to detect tab
+  document.querySelectorAll('.tab')[1].click();
+  toast('✓ Text loaded in detector');
+}
+
+function updateMeta(id, original, humanized) {
+  const el = document.getElementById(id);
+  const ow = original.trim().split(/\s+/).length;
+  const hw = humanized.trim().split(/\s+/).length;
+  el.textContent = ow + ' → ' + hw + ' words';
+}
+
+// Update word counts on input
+document.querySelectorAll('textarea').forEach(ta => {
+  ta.addEventListener('input', () => {
+    const id = ta.id;
+    const parentMeta = ta.closest('.card, .split-panel, .tab-content');
+    if (!parentMeta) return;
+    const metaEl = parentMeta.querySelector('.meta');
+    if (metaEl && !ta.readOnly) {
+      const w = ta.value.trim() ? ta.value.trim().split(/\s+/).length : 0;
+      metaEl.textContent = w + ' words';
+    }
+  });
+});
+
+// ─── Humanize ───
+async function doHumanize(inputId, outputId) {
+  const input = document.getElementById(inputId);
+  const output = document.getElementById(outputId);
+  const text = input.value.trim();
+  if (!text) { toast('Paste some text first'); return; }
+
+  const btn = event.target.closest('.btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Humanizing...';
+
+  try {
+    const resp = await fetch('/api/humanize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text, passes: currentPasses }),
+    });
+    const data = await resp.json();
+    if (data.error) { toast(data.error); return; }
+    output.value = data.humanized;
+    const metaId = outputId === 'hOutput' ? 'hMeta' : 'wMeta';
+    updateMeta(metaId, data.original, data.humanized);
+
+    // Show diff stats
+    const diff = document.getElementById('hDiff');
+    if (diff && outputId === 'hOutput') {
+      const origWords = new Set(data.original.toLowerCase().split(/\s+/));
+      const newWords = new Set(data.humanized.toLowerCase().split(/\s+/));
+      const changed = [...newWords].filter(w => !origWords.has(w)).length;
+      diff.style.display = 'block';
+      diff.innerHTML = '🔄 <strong>' + changed + ' new word choices</strong> introduced · ' +
+        data.original_word_count + ' → ' + data.humanized_word_count + ' words · ' +
+        currentPasses + ' pass' + (currentPasses > 1 ? 'es' : '');
+    }
+  } catch(e) {
+    toast('Error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '✏️ Humanize';
+  }
+}
+
+// ─── Detection ───
+function barColor(pct) {
+  if (pct <= 15) return 'linear-gradient(90deg,#00b894,#55efc4)';
+  if (pct <= 40) return 'linear-gradient(90deg,#00b894,#ffeaa7)';
+  if (pct <= 60) return 'linear-gradient(90deg,#ffeaa7,#fdcb6e)';
+  if (pct <= 85) return 'linear-gradient(90deg,#e17055,#fdcb6e)';
+  return 'linear-gradient(90deg,#d63031,#e17055)';
+}
+function verdictClass(v) {
+  if (v.includes('Human')) return 'v-human';
+  if (v.includes('Mixed')) return 'v-mixed';
+  return 'v-ai';
+}
+
+function renderCard(r) {
+  const d = document.createElement('div');
+  d.className = 'result-card';
+  if (r.status === 'success') {
+    d.innerHTML = `
+      <div class="rh"><span class="rname">${r.detector}</span><span class="badge b-ok">✓ Done</span></div>
+      <div class="score-line"><span class="l">AI</span><span class="v" style="color:${r.ai_percentage>50?'var(--red)':'var(--green)'}">${r.ai_percentage}%</span></div>
+      <div class="score-line"><span class="l">Human</span><span class="v">${r.human_percentage}%</span></div>
+      <div class="rbar"><div class="rbar-fill" style="width:${r.ai_percentage}%;background:${barColor(r.ai_percentage)}"></div></div>
+      <div class="rverdict">${r.verdict}</div>
+      ${r.details ? '<div class="rmsg">'+r.details+'</div>' : ''}`;
+  } else if (r.status === 'manual') {
+    d.innerHTML = `
+      <div class="rh"><span class="rname">${r.detector}</span><span class="badge b-man">Manual</span></div>
+      <div class="rmsg">${r.message}</div>
+      ${r.url ? '<a href="'+r.url+'" target="_blank" class="rlink">Open '+r.detector+' ↗</a>' : ''}`;
+  } else {
+    d.innerHTML = `
+      <div class="rh"><span class="rname">${r.detector}</span><span class="badge b-err">Error</span></div>
+      <div class="rmsg">${r.message||'Unknown error'}</div>`;
+  }
+  return d;
+}
+
+async function runDetection(inputId, summaryId, resultsId, progressId) {
+  summaryId = summaryId || 'detectSummary';
+  resultsId = resultsId || 'detectResults';
+  progressId = progressId || 'detectProgress';
+
+  const text = document.getElementById(inputId).value.trim();
+  if (!text) { toast('Paste some text first'); return; }
+  if (text.length < 50) { toast('Need at least 50 characters'); return; }
+
+  const prog = document.getElementById(progressId);
+  const grid = document.getElementById(resultsId);
+  const summ = document.getElementById(summaryId);
+
+  prog.classList.add('active');
+  grid.innerHTML = '';
+  summ.classList.remove('visible');
+
+  // Loading placeholders
+  ['ZeroGPT','Sapling AI','GPTZero','Writer.com','Quillbot','Copyleaks'].forEach(n => {
+    const c = document.createElement('div');
+    c.className = 'result-card';
+    c.style.opacity = '0.5';
+    c.innerHTML = '<div class="rh"><span class="rname">'+n+'</span><span class="badge b-load"><span class="spinner"></span></span></div><div class="rmsg">Checking...</div>';
+    grid.appendChild(c);
+  });
+
+  try {
+    const resp = await fetch('/api/check', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text}),
+    });
+    const data = await resp.json();
+    if (data.error) { toast(data.error); grid.innerHTML=''; return; }
+
+    grid.innerHTML = '';
+    data.results.forEach(r => grid.appendChild(renderCard(r)));
+
+    const s = data.summary;
+    if (s.total_checked > 0) {
+      summ.classList.add('visible');
+      const prefix = summaryId.startsWith('wf') ? 'w' : 'd';
+      document.getElementById(prefix+'HumanPct').textContent = s.avg_human_percentage + '%';
+      document.getElementById(prefix+'AiPct').textContent = s.avg_ai_percentage + '%';
+      document.getElementById(prefix+'HumanBar').style.width = s.avg_human_percentage + '%';
+      document.getElementById(prefix+'AiBar').style.width = s.avg_ai_percentage + '%';
+      const vEl = document.getElementById(prefix+'Verdict');
+      vEl.textContent = s.overall_verdict;
+      vEl.className = 'verdict-badge ' + verdictClass(s.overall_verdict);
+    }
+  } catch(e) {
+    toast('Error: ' + e.message);
+  } finally {
+    prog.classList.remove('active');
+  }
+}
+
+// ─── Full Workflow ───
+async function runWorkflow() {
+  const input = document.getElementById('wInput');
+  const text = input.value.trim();
+  if (!text) { toast('Paste some text first'); return; }
+
+  const btn = document.getElementById('workflowBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Step 1: Humanizing...';
+
+  const prog = document.getElementById('wfProgress');
+  prog.classList.add('active');
+  document.getElementById('wfHumanizedCard').style.display = 'none';
+  document.getElementById('wfSummary').classList.remove('visible');
+  document.getElementById('wfResults').innerHTML = '';
+
+  try {
+    // Step 1: Humanize
+    const hResp = await fetch('/api/humanize', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text, passes: currentPasses}),
+    });
+    const hData = await hResp.json();
+    if (hData.error) { toast(hData.error); return; }
+
+    document.getElementById('wOutput').value = hData.humanized;
+    document.getElementById('wfHumanizedCard').style.display = 'block';
+    updateMeta('wMeta', hData.original, hData.humanized);
+
+    // Step 2: Detect
+    btn.innerHTML = '<span class="spinner"></span> Step 2: Detecting...';
+
+    const dResp = await fetch('/api/check', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: hData.humanized}),
+    });
+    const dData = await dResp.json();
+    if (dData.error) { toast(dData.error); return; }
+
+    const grid = document.getElementById('wfResults');
+    grid.innerHTML = '';
+    dData.results.forEach(r => grid.appendChild(renderCard(r)));
+
+    const s = dData.summary;
+    if (s.total_checked > 0) {
+      const summ = document.getElementById('wfSummary');
+      summ.classList.add('visible');
+      document.getElementById('wHumanPct').textContent = s.avg_human_percentage + '%';
+      document.getElementById('wAiPct').textContent = s.avg_ai_percentage + '%';
+      document.getElementById('wHumanBar').style.width = s.avg_human_percentage + '%';
+      document.getElementById('wAiBar').style.width = s.avg_ai_percentage + '%';
+      const vEl = document.getElementById('wVerdict');
+      vEl.textContent = s.overall_verdict;
+      vEl.className = 'verdict-badge ' + verdictClass(s.overall_verdict);
+    }
+
+  } catch(e) {
+    toast('Error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '⚡ Humanize & Detect';
+    prog.classList.remove('active');
+  }
+}
+
+// Keyboard shortcut: Cmd/Ctrl+Enter
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    const active = document.querySelector('.tab-content.active');
+    if (active.id === 'tab-humanize') doHumanize('hInput','hOutput');
+    else if (active.id === 'tab-detect') runDetection('dInput');
+    else if (active.id === 'tab-workflow') runWorkflow();
+  }
+});
+</script>
+
+</body>
+</html>
+'''
+
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    print("\n" + "=" * 60)
+    print("  AI Humanizer + Detector Panel")
+    print(f"  Open  http://127.0.0.1:{port}  in your browser")
+    print("  Cmd+C to stop")
+    print("=" * 60 + "\n")
+    app.run(host="0.0.0.0", port=port, debug=False)
