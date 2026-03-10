@@ -290,17 +290,57 @@ def check_zerogpt(text):
         return _manual_result("ZeroGPT", "https://www.zerogpt.com/", str(e))
 
 
-def check_sapling(text):
-    """Check text against Sapling.ai's detector."""
+def _get_sapling_key():
+    """Dynamically fetch the Sapling API key from their website."""
     try:
-        url = "https://sapling.ai/api/v1/aidetect"
+        resp = requests.get(
+            "https://sapling.ai/ai-content-detector",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/122.0.0.0 Safari/537.36",
+            },
+            timeout=15,
+        )
+        # The key is embedded in the page JS like: key: 'eyJ...'
+        match = re.search(r"key:\s*'(eyJ[^']+)'", resp.text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+# Cache the sapling key so we don't fetch it every time
+_sapling_key_cache = {"key": None, "fetched_at": 0}
+
+
+def check_sapling(text):
+    """Check text against Sapling.ai's detector with dynamic key."""
+    try:
+        # Refresh key if older than 30 minutes
+        now = time.time()
+        if not _sapling_key_cache["key"] or now - _sapling_key_cache["fetched_at"] > 1800:
+            new_key = _get_sapling_key()
+            if new_key:
+                _sapling_key_cache["key"] = new_key
+                _sapling_key_cache["fetched_at"] = now
+
+        api_key = _sapling_key_cache["key"]
+        if not api_key:
+            return _manual_result("Sapling AI", "https://sapling.ai/ai-content-detector",
+                                  "Could not fetch API key. Check manually.")
+
+        url = "https://api.sapling.ai/api/v1/aidetect"
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/122.0.0.0 Safari/537.36",
             "Origin": "https://sapling.ai",
             "Referer": "https://sapling.ai/ai-content-detector",
         }
-        payload = {"text": text}
+        payload = {"key": api_key, "text": text}
         resp = requests.post(url, json=payload, headers=headers, timeout=30)
 
         if resp.status_code != 200:
@@ -308,8 +348,22 @@ def check_sapling(text):
                                   f"HTTP {resp.status_code}")
 
         data = resp.json()
+        if "msg" in data and "Invalid" in str(data["msg"]):
+            # Key expired, clear cache and fallback
+            _sapling_key_cache["key"] = None
+            return _manual_result("Sapling AI", "https://sapling.ai/ai-content-detector",
+                                  "Key expired. Check manually.")
+
         score = data.get("score", 0)
         ai_pct = round(float(score) * 100, 1)
+
+        # Get per-sentence scores for details
+        sentence_scores = data.get("sentence_scores", [])
+        detail_parts = [f"Overall: {score:.3f}"]
+        for ss in sentence_scores[:3]:
+            s_score = ss.get("score", 0)
+            s_text = ss.get("sentence", "")[:60]
+            detail_parts.append(f"  \"{s_text}...\" → {s_score:.2f}")
 
         return {
             "detector": "Sapling AI",
@@ -317,63 +371,34 @@ def check_sapling(text):
             "ai_percentage": ai_pct,
             "human_percentage": round(100 - ai_pct, 1),
             "verdict": _verdict(ai_pct),
-            "details": f"Confidence: {score:.3f}",
+            "details": " | ".join(detail_parts[:2]),
         }
     except Exception as e:
         return _manual_result("Sapling AI", "https://sapling.ai/ai-content-detector", str(e))
 
 
-def check_writer(text):
-    """Writer.com detector - needs captcha, so manual."""
-    return _manual_result("Writer.com", "https://writer.com/ai-content-detector/",
-                          "Requires browser verification. Click to check manually.")
-
-
-def check_copyleaks(text):
-    """Copyleaks detector - needs auth, so manual."""
-    return _manual_result("Copyleaks", "https://copyleaks.com/ai-content-detector",
-                          "Requires login. Click to check manually.")
-
-
 def check_gptzero(text):
-    """GPTZero - try their demo endpoint."""
-    try:
-        url = "https://api.gptzero.me/v2/predict/text"
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Origin": "https://gptzero.me",
-            "Referer": "https://gptzero.me/",
-        }
-        payload = {"document": text}
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-
-        if resp.status_code != 200:
-            return _manual_result("GPTZero", "https://gptzero.me/",
-                                  f"API returned {resp.status_code}. Check manually.")
-
-        data = resp.json()
-        doc = data.get("documents", [{}])[0] if data.get("documents") else {}
-        ai_prob = doc.get("completely_generated_prob",
-                    doc.get("average_generated_prob", 0))
-        ai_pct = round(float(ai_prob) * 100, 1)
-
-        return {
-            "detector": "GPTZero",
-            "status": "success",
-            "ai_percentage": ai_pct,
-            "human_percentage": round(100 - ai_pct, 1),
-            "verdict": _verdict(ai_pct),
-            "details": doc.get("classification", ""),
-        }
-    except Exception as e:
-        return _manual_result("GPTZero", "https://gptzero.me/", str(e))
+    """GPTZero - requires paid API, manual check."""
+    return _manual_result("GPTZero", "https://gptzero.me/",
+                          "Requires login. Open & paste to check.")
 
 
 def check_quillbot(text):
-    """Quillbot AI detector - manual check."""
+    """Quillbot AI detector - no free API, manual check."""
     return _manual_result("Quillbot", "https://www.quillbot.com/ai-content-detector",
-                          "Requires browser. Click to check manually.")
+                          "Open & paste to check.")
+
+
+def check_copyleaks(text):
+    """Copyleaks detector - needs auth, manual check."""
+    return _manual_result("Copyleaks", "https://copyleaks.com/ai-content-detector",
+                          "Requires login. Open & paste to check.")
+
+
+def check_scribbr(text):
+    """Scribbr AI detector - Cloudflare protected, manual check."""
+    return _manual_result("Scribbr", "https://www.scribbr.com/ai-detector/",
+                          "Open & paste to check.")
 
 
 def _manual_result(name, url, msg):
@@ -498,9 +523,9 @@ def check_all():
         check_zerogpt,
         check_sapling,
         check_gptzero,
-        check_writer,
         check_quillbot,
         check_copyleaks,
+        check_scribbr,
     ]
 
     def run_detector(fn):
@@ -885,15 +910,17 @@ HTML_TEMPLATE = r'''
     <div class="results-grid" id="detectResults"></div>
 
     <div class="manual-section card">
-      <h4>🔗 Manual Check — copies text & opens detector</h4>
+      <h4>🔗 Quick Manual Check — copies text & opens detector site</h4>
       <div class="manual-grid">
         <a class="mbtn" onclick="openManual('dInput','https://www.zerogpt.com/')">ZeroGPT ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://gptzero.me/')">GPTZero ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://www.quillbot.com/ai-content-detector')">Quillbot ↗</a>
-        <a class="mbtn" onclick="openManual('dInput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://www.scribbr.com/ai-detector/')">Scribbr ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://originality.ai/')">Originality.ai ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
+        <a class="mbtn" onclick="openManual('dInput','https://contentdetector.ai/')">ContentDetector ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://undetectable.ai/')">Undetectable.ai ↗</a>
       </div>
     </div>
@@ -953,15 +980,17 @@ HTML_TEMPLATE = r'''
     <div class="results-grid" id="wfResults"></div>
 
     <div class="manual-section card">
-      <h4>🔗 Manual Check — copies humanized text & opens detector</h4>
+      <h4>🔗 Quick Manual Check — copies humanized text & opens detector site</h4>
       <div class="manual-grid">
         <a class="mbtn" onclick="openManual('wOutput','https://www.zerogpt.com/')">ZeroGPT ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://gptzero.me/')">GPTZero ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://www.quillbot.com/ai-content-detector')">Quillbot ↗</a>
-        <a class="mbtn" onclick="openManual('wOutput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://www.scribbr.com/ai-detector/')">Scribbr ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://originality.ai/')">Originality.ai ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
+        <a class="mbtn" onclick="openManual('wOutput','https://contentdetector.ai/')">ContentDetector ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://undetectable.ai/')">Undetectable.ai ↗</a>
       </div>
     </div>
@@ -1172,7 +1201,7 @@ async function runDetection(inputId, summaryId, resultsId, progressId) {
   summ.classList.remove('visible');
 
   // Loading placeholders
-  ['ZeroGPT','Sapling AI','GPTZero','Writer.com','Quillbot','Copyleaks'].forEach(n => {
+  ['ZeroGPT','Sapling AI','GPTZero','Quillbot','Copyleaks','Scribbr'].forEach(n => {
     const c = document.createElement('div');
     c.className = 'result-card';
     c.style.opacity = '0.5';
