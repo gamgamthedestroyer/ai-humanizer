@@ -634,6 +634,10 @@ def humanize_until():
     best_text = text
     best_ai_pct = 100.0
     best_iteration = 0
+    stagnant_rounds = 0          # count iterations with no improvement
+    stagnation_limit = 15        # stop after this many rounds without progress
+    consecutive_errors = 0       # count consecutive total-failure iterations
+    stop_reason = None
 
     for i in range(max_iterations):
         # Humanize (always 2 passes for consistent quality)
@@ -673,6 +677,15 @@ def humanize_until():
         avg_pct = round(sum(scores) / len(scores), 1) if scores else 100.0
         max_pct = max(scores) if scores else 100.0
 
+        # Track consecutive detector failures
+        if not scores:
+            consecutive_errors += 1
+            if consecutive_errors >= 5:
+                stop_reason = "detectors_failed"
+                break
+        else:
+            consecutive_errors = 0
+
         iterations.append({
             "iteration": i + 1,
             "ai_percentage": avg_pct,
@@ -689,9 +702,18 @@ def humanize_until():
             best_ai_pct = avg_pct
             best_text = current_text
             best_iteration = i + 1
+            stagnant_rounds = 0      # reset — we improved
+        else:
+            stagnant_rounds += 1
 
         # Check if we hit the target (average of both detectors)
         if avg_pct <= target:
+            stop_reason = "target_reached"
+            break
+
+        # Stop if no improvement for too long (text won't get better)
+        if stagnant_rounds >= stagnation_limit:
+            stop_reason = "stagnated"
             break
 
     # Strip text snapshots from response (too large), keep best
@@ -711,6 +733,7 @@ def humanize_until():
         "target_reached": best_ai_pct <= target,
         "total_iterations": len(iterations),
         "best_iteration": best_iteration,
+        "stop_reason": stop_reason or ("target_reached" if best_ai_pct <= target else "max_iterations"),
     })
 
 
@@ -1523,7 +1546,10 @@ async function doHumanizeUntil(inputId, outputId, iterLogId, metaId) {
     const diff = document.getElementById('hDiff');
     if (diff && inputId === 'hInput') {
       diff.style.display = 'block';
-      const status = data.target_reached ? '✅ Target reached!' : '⚠️ Target not reached — try again or raise limit';
+      const status = data.target_reached ? '✅ Target reached!'
+        : data.stop_reason === 'stagnated' ? '⚠️ Plateaued — no improvement in 15 rounds. Best result returned.'
+        : data.stop_reason === 'detectors_failed' ? '❌ Detectors failed 5x in a row'
+        : '⚠️ Target not reached — try again or raise limit';
       const bestNote = data.best_iteration !== data.total_iterations ? ' (best was iteration #' + data.best_iteration + ')' : '';
       diff.innerHTML = status + ' · ' +
         data.total_iterations + ' iteration' + (data.total_iterations > 1 ? 's' : '') + bestNote + ' · ' +
@@ -1533,6 +1559,10 @@ async function doHumanizeUntil(inputId, outputId, iterLogId, metaId) {
 
     if (data.target_reached) {
       toast('✅ Hit target: ' + data.final_ai_percentage + '% AI (best of ' + data.total_iterations + ' tries)');
+    } else if (data.stop_reason === 'stagnated') {
+      toast('⚠️ Plateaued at ' + data.final_ai_percentage + '% AI after ' + data.total_iterations + ' tries — best was #' + data.best_iteration, 5000);
+    } else if (data.stop_reason === 'detectors_failed') {
+      toast('❌ Detectors failed repeatedly — best: ' + data.final_ai_percentage + '% AI', 5000);
     } else {
       toast('⚠️ Best: ' + data.final_ai_percentage + '% AI (iteration #' + data.best_iteration + ')');
     }
@@ -1747,7 +1777,9 @@ async function runWorkflow() {
 
     const statusMsg = hData.target_reached
       ? '✅ Target reached in ' + hData.total_iterations + ' iteration(s)!'
-      : '⚠️ Best: ' + hData.final_ai_percentage + '% after ' + hData.total_iterations + ' tries';
+      : hData.stop_reason === 'stagnated'
+        ? '⚠️ Plateaued at ' + hData.final_ai_percentage + '% after ' + hData.total_iterations + ' tries'
+        : '⚠️ Best: ' + hData.final_ai_percentage + '% after ' + hData.total_iterations + ' tries';
     toast(statusMsg, 4000);
 
     // Step 2: Full detection on final result
