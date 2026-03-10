@@ -403,34 +403,48 @@ def check_scribbr(text):
                           "Open & paste to check.")
 
 
+# ─── Local HuggingFace model pipelines (lazy-loaded) ────────────────────────
+_roberta_openai_pipe = None
+_hc3_chatgpt_pipe = None
+
+
+def _get_roberta_openai_pipe():
+    """Lazy-load the RoBERTa OpenAI GPT-2 detector pipeline."""
+    global _roberta_openai_pipe
+    if _roberta_openai_pipe is None:
+        from transformers import pipeline as hf_pipeline
+        _roberta_openai_pipe = hf_pipeline(
+            "text-classification",
+            model="openai-community/roberta-base-openai-detector",
+            top_k=None,
+            device=-1,  # CPU
+        )
+    return _roberta_openai_pipe
+
+
+def _get_hc3_chatgpt_pipe():
+    """Lazy-load the HC3 ChatGPT detector pipeline."""
+    global _hc3_chatgpt_pipe
+    if _hc3_chatgpt_pipe is None:
+        from transformers import pipeline as hf_pipeline
+        _hc3_chatgpt_pipe = hf_pipeline(
+            "text-classification",
+            model="Hello-SimpleAI/chatgpt-detector-roberta",
+            top_k=None,
+            device=-1,  # CPU
+        )
+    return _hc3_chatgpt_pipe
+
+
 def check_roberta_openai(text):
-    """RoBERTa OpenAI GPT detector via HuggingFace Inference API."""
+    """RoBERTa OpenAI GPT detector — runs locally via transformers."""
     try:
-        url = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
-        headers = {"Content-Type": "application/json"}
-        hf_token = os.environ.get("HF_TOKEN")
-        if hf_token:
-            headers["Authorization"] = f"Bearer {hf_token}"
-        # Model has 512 token limit, truncate input
-        payload = {"inputs": text[:1500]}
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        if resp.status_code == 503:
-            data = resp.json()
-            wait = data.get("estimated_time", 20)
-            return _manual_result("RoBERTa OpenAI",
-                                  "https://huggingface.co/openai-community/roberta-base-openai-detector",
-                                  f"Model loading (~{int(wait)}s). Try again shortly.")
-        if resp.status_code != 200:
-            return _manual_result("RoBERTa OpenAI",
-                                  "https://huggingface.co/openai-community/roberta-base-openai-detector",
-                                  f"HTTP {resp.status_code}")
-        data = resp.json()
-        # Response: [[{"label": "Real", "score": 0.8}, {"label": "Fake", "score": 0.2}]]
-        results = data[0] if isinstance(data, list) and data else data
-        if isinstance(results, list) and results and isinstance(results[0], list):
-            results = results[0]
+        pipe = _get_roberta_openai_pipe()
+        raw = pipe(text[:1500])
+        # Pipeline returns [[{label, score}, ...]] for single input
+        results = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], list) else raw
         fake_score = 0
-        for item in results if isinstance(results, list) else []:
+        for item in (results if isinstance(results, list) else []):
             if item.get("label") in ("Fake", "LABEL_1"):
                 fake_score = item.get("score", 0)
         ai_pct = round(float(fake_score) * 100, 1)
@@ -440,40 +454,25 @@ def check_roberta_openai(text):
             "ai_percentage": ai_pct,
             "human_percentage": round(100 - ai_pct, 1),
             "verdict": _verdict(ai_pct),
-            "details": "GPT-2 output detector (RoBERTa-base)",
+            "details": "GPT-2 output detector (RoBERTa-base) — local",
         }
     except Exception as e:
-        return _manual_result("RoBERTa OpenAI",
-                              "https://huggingface.co/openai-community/roberta-base-openai-detector",
-                              str(e))
+        return {
+            "detector": "RoBERTa OpenAI",
+            "status": "error",
+            "message": str(e),
+        }
 
 
 def check_hc3_chatgpt(text):
-    """HC3 ChatGPT detector via HuggingFace Inference API."""
+    """HC3 ChatGPT detector — runs locally via transformers."""
     try:
-        url = "https://api-inference.huggingface.co/models/Hello-SimpleAI/chatgpt-detector-roberta"
-        headers = {"Content-Type": "application/json"}
-        hf_token = os.environ.get("HF_TOKEN")
-        if hf_token:
-            headers["Authorization"] = f"Bearer {hf_token}"
-        payload = {"inputs": text[:1500]}
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        if resp.status_code == 503:
-            data = resp.json()
-            wait = data.get("estimated_time", 20)
-            return _manual_result("HC3 ChatGPT",
-                                  "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
-                                  f"Model loading (~{int(wait)}s). Try again shortly.")
-        if resp.status_code != 200:
-            return _manual_result("HC3 ChatGPT",
-                                  "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
-                                  f"HTTP {resp.status_code}")
-        data = resp.json()
-        results = data[0] if isinstance(data, list) and data else data
-        if isinstance(results, list) and results and isinstance(results[0], list):
-            results = results[0]
+        pipe = _get_hc3_chatgpt_pipe()
+        raw = pipe(text[:1500])
+        # Pipeline returns [[{label, score}, ...]] for single input
+        results = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], list) else raw
         chatgpt_score = 0
-        for item in results if isinstance(results, list) else []:
+        for item in (results if isinstance(results, list) else []):
             if item.get("label") in ("ChatGPT", "LABEL_1"):
                 chatgpt_score = item.get("score", 0)
         ai_pct = round(float(chatgpt_score) * 100, 1)
@@ -483,12 +482,14 @@ def check_hc3_chatgpt(text):
             "ai_percentage": ai_pct,
             "human_percentage": round(100 - ai_pct, 1),
             "verdict": _verdict(ai_pct),
-            "details": "ChatGPT detector trained on HC3 dataset",
+            "details": "ChatGPT detector trained on HC3 dataset — local",
         }
     except Exception as e:
-        return _manual_result("HC3 ChatGPT",
-                              "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
-                              str(e))
+        return {
+            "detector": "HC3 ChatGPT",
+            "status": "error",
+            "message": str(e),
+        }
 
 
 def _manual_result(name, url, msg):
@@ -620,7 +621,7 @@ def humanize_until():
     data = request.get_json()
     text = data.get("text", "").strip()
     target = float(data.get("target", 0))
-    max_iterations = int(data.get("max_iterations", 50))
+    max_iterations = int(data.get("max_iterations", 999))
     strip_chars = bool(data.get("strip_suspicious", False))
 
     if not text:
