@@ -5,10 +5,12 @@ Humanize AI-generated text, then check it against multiple detectors.
 """
 
 import json
+import os
 import re
 import random
 import time
 import threading
+import urllib.parse
 import requests
 from flask import Flask, render_template_string, request, jsonify
 
@@ -401,6 +403,94 @@ def check_scribbr(text):
                           "Open & paste to check.")
 
 
+def check_roberta_openai(text):
+    """RoBERTa OpenAI GPT detector via HuggingFace Inference API."""
+    try:
+        url = "https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector"
+        headers = {"Content-Type": "application/json"}
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        # Model has 512 token limit, truncate input
+        payload = {"inputs": text[:1500]}
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 503:
+            data = resp.json()
+            wait = data.get("estimated_time", 20)
+            return _manual_result("RoBERTa OpenAI",
+                                  "https://huggingface.co/openai-community/roberta-base-openai-detector",
+                                  f"Model loading (~{int(wait)}s). Try again shortly.")
+        if resp.status_code != 200:
+            return _manual_result("RoBERTa OpenAI",
+                                  "https://huggingface.co/openai-community/roberta-base-openai-detector",
+                                  f"HTTP {resp.status_code}")
+        data = resp.json()
+        # Response: [[{"label": "Real", "score": 0.8}, {"label": "Fake", "score": 0.2}]]
+        results = data[0] if isinstance(data, list) and data else data
+        if isinstance(results, list) and results and isinstance(results[0], list):
+            results = results[0]
+        fake_score = 0
+        for item in results if isinstance(results, list) else []:
+            if item.get("label") in ("Fake", "LABEL_1"):
+                fake_score = item.get("score", 0)
+        ai_pct = round(float(fake_score) * 100, 1)
+        return {
+            "detector": "RoBERTa OpenAI",
+            "status": "success",
+            "ai_percentage": ai_pct,
+            "human_percentage": round(100 - ai_pct, 1),
+            "verdict": _verdict(ai_pct),
+            "details": "GPT-2 output detector (RoBERTa-base)",
+        }
+    except Exception as e:
+        return _manual_result("RoBERTa OpenAI",
+                              "https://huggingface.co/openai-community/roberta-base-openai-detector",
+                              str(e))
+
+
+def check_hc3_chatgpt(text):
+    """HC3 ChatGPT detector via HuggingFace Inference API."""
+    try:
+        url = "https://api-inference.huggingface.co/models/Hello-SimpleAI/chatgpt-detector-roberta"
+        headers = {"Content-Type": "application/json"}
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        payload = {"inputs": text[:1500]}
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        if resp.status_code == 503:
+            data = resp.json()
+            wait = data.get("estimated_time", 20)
+            return _manual_result("HC3 ChatGPT",
+                                  "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
+                                  f"Model loading (~{int(wait)}s). Try again shortly.")
+        if resp.status_code != 200:
+            return _manual_result("HC3 ChatGPT",
+                                  "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
+                                  f"HTTP {resp.status_code}")
+        data = resp.json()
+        results = data[0] if isinstance(data, list) and data else data
+        if isinstance(results, list) and results and isinstance(results[0], list):
+            results = results[0]
+        chatgpt_score = 0
+        for item in results if isinstance(results, list) else []:
+            if item.get("label") in ("ChatGPT", "LABEL_1"):
+                chatgpt_score = item.get("score", 0)
+        ai_pct = round(float(chatgpt_score) * 100, 1)
+        return {
+            "detector": "HC3 ChatGPT",
+            "status": "success",
+            "ai_percentage": ai_pct,
+            "human_percentage": round(100 - ai_pct, 1),
+            "verdict": _verdict(ai_pct),
+            "details": "ChatGPT detector trained on HC3 dataset",
+        }
+    except Exception as e:
+        return _manual_result("HC3 ChatGPT",
+                              "https://huggingface.co/Hello-SimpleAI/chatgpt-detector-roberta",
+                              str(e))
+
+
 def _manual_result(name, url, msg):
     return {
         "detector": name,
@@ -421,6 +511,77 @@ def _verdict(ai_pct):
         return "Mostly AI"
     else:
         return "AI Generated"
+
+
+def strip_suspicious_chars(text):
+    """Remove characters and patterns commonly flagged as AI-generated."""
+    # Em dashes → commas or regular dashes
+    text = re.sub(r'\s*—\s*', ', ', text)
+    # En dashes → regular dashes
+    text = text.replace('–', '-')
+    # Curly/smart quotes → straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"')
+    text = text.replace('\u2018', "'").replace('\u2019', "'")
+    # Ellipsis character → three dots
+    text = text.replace('\u2026', '...')
+    # Bullet points → dashes
+    text = text.replace('\u2022', '-')
+    # Non-breaking spaces → regular spaces
+    text = text.replace('\u00a0', ' ')
+    # Double spaces
+    text = re.sub(r'  +', ' ', text)
+    # Fix any double commas from em dash replacement
+    text = re.sub(r',\s*,', ',', text)
+    # Semicolons (AI overuses them) → periods with new sentence
+    def semicolon_to_period(m):
+        after = m.group(1).strip()
+        if after and after[0].islower():
+            after = after[0].upper() + after[1:]
+        return '. ' + after
+    text = re.sub(r';\s*(.)', semicolon_to_period, text)
+    # Colons mid-sentence (AI pattern) → period when followed by uppercase
+    # Skip if preceded by common colon words
+    def replace_colon(m):
+        before = m.string[max(0, m.start()-15):m.start()].lower()
+        keep_words = ['example', 'following', 'include', 'including', 'such as', 'namely', 'i.e', 'e.g']
+        if any(before.endswith(w) for w in keep_words):
+            return m.group(0)
+        return '. '
+    text = re.sub(r':\s*(?=[A-Z])', replace_colon, text)
+    return text.strip()
+
+
+# ─── Plagiarism Search ────────────────────────────────────────────────────────
+
+def _search_web(phrase):
+    """Search for exact phrase matches online via DuckDuckGo."""
+    try:
+        resp = requests.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": f'"{phrase[:100]}"'},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/122.0.0.0 Safari/537.36",
+            },
+            timeout=15,
+        )
+        matches = []
+        for m in re.finditer(
+            r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            resp.text, re.DOTALL
+        ):
+            href, title = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            actual = re.search(r'uddg=([^&]+)', href)
+            if actual:
+                href = urllib.parse.unquote(actual.group(1))
+            if href.startswith('http') and 'duckduckgo' not in href:
+                matches.append({"url": href, "title": title or href})
+                if len(matches) >= 3:
+                    break
+        return matches
+    except Exception:
+        return []
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -454,12 +615,13 @@ def humanize():
 
 @app.route("/api/humanize-until", methods=["POST"])
 def humanize_until():
-    """Iteratively humanize text until it hits a target AI % threshold."""
+    """Iteratively humanize text until it hits a target AI % threshold.
+    Cross-references ZeroGPT AND Sapling — uses the MAX (worst) score."""
     data = request.get_json()
     text = data.get("text", "").strip()
     target = float(data.get("target", 0))
-    passes = min(int(data.get("passes", 2)), 3)
-    max_iterations = min(int(data.get("max_iterations", 10)), 15)
+    max_iterations = int(data.get("max_iterations", 50))
+    strip_chars = bool(data.get("strip_suspicious", False))
 
     if not text:
         return jsonify({"error": "No text provided"}), 400
@@ -468,39 +630,86 @@ def humanize_until():
 
     iterations = []
     current_text = text
+    best_text = text
+    best_ai_pct = 100.0
+    best_iteration = 0
 
     for i in range(max_iterations):
-        # Humanize
-        current_text = current_text
-        for _ in range(passes):
+        # Humanize (always 2 passes for consistent quality)
+        for _ in range(2):
             current_text = humanize_text(current_text)
 
-        # Quick-check with ZeroGPT (fastest reliable detector)
-        result = check_zerogpt(current_text)
-        ai_pct = 100.0
-        if result["status"] == "success":
-            ai_pct = result["ai_percentage"]
+        # Strip suspicious AI characters if requested
+        if strip_chars:
+            current_text = strip_suspicious_chars(current_text)
+
+        # Cross-reference BOTH detectors concurrently
+        zerogpt_result = {"status": "error"}
+        sapling_result = {"status": "error"}
+        threads = []
+
+        def run_zero():
+            nonlocal zerogpt_result
+            zerogpt_result = check_zerogpt(current_text)
+
+        def run_sapling():
+            nonlocal sapling_result
+            sapling_result = check_sapling(current_text)
+
+        t1 = threading.Thread(target=run_zero)
+        t2 = threading.Thread(target=run_sapling)
+        threads = [t1, t2]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=35)
+
+        # Get scores from both, use AVERAGE for target check
+        z_pct = zerogpt_result.get("ai_percentage", 100.0) if zerogpt_result["status"] == "success" else None
+        s_pct = sapling_result.get("ai_percentage", 100.0) if sapling_result["status"] == "success" else None
+
+        scores = [p for p in [z_pct, s_pct] if p is not None]
+        avg_pct = round(sum(scores) / len(scores), 1) if scores else 100.0
+        max_pct = max(scores) if scores else 100.0
 
         iterations.append({
             "iteration": i + 1,
-            "ai_percentage": ai_pct,
-            "verdict": result.get("verdict", _verdict(ai_pct)),
+            "ai_percentage": avg_pct,
+            "max_percentage": max_pct,
+            "zerogpt": round(z_pct, 1) if z_pct is not None else None,
+            "sapling": round(s_pct, 1) if s_pct is not None else None,
+            "verdict": _verdict(avg_pct),
             "word_count": len(current_text.split()),
+            "text_snapshot": current_text,
         })
 
-        # Check if we hit the target
-        if ai_pct <= target:
+        # Track best result (lowest AVERAGE ai%)
+        if avg_pct < best_ai_pct:
+            best_ai_pct = avg_pct
+            best_text = current_text
+            best_iteration = i + 1
+
+        # Check if we hit the target (average of both detectors)
+        if avg_pct <= target:
             break
+
+    # Strip text snapshots from response (too large), keep best
+    clean_iterations = []
+    for it in iterations:
+        clean_it = {k: v for k, v in it.items() if k != "text_snapshot"}
+        clean_it["is_best"] = it["iteration"] == best_iteration
+        clean_iterations.append(clean_it)
 
     return jsonify({
         "original": text,
-        "humanized": current_text,
+        "humanized": best_text,
         "original_word_count": len(text.split()),
-        "humanized_word_count": len(current_text.split()),
-        "iterations": iterations,
-        "final_ai_percentage": iterations[-1]["ai_percentage"] if iterations else 100,
-        "target_reached": iterations[-1]["ai_percentage"] <= target if iterations else False,
+        "humanized_word_count": len(best_text.split()),
+        "iterations": clean_iterations,
+        "final_ai_percentage": round(best_ai_pct, 1),
+        "target_reached": best_ai_pct <= target,
         "total_iterations": len(iterations),
+        "best_iteration": best_iteration,
     })
 
 
@@ -522,6 +731,8 @@ def check_all():
     detectors = [
         check_zerogpt,
         check_sapling,
+        check_roberta_openai,
+        check_hc3_chatgpt,
         check_gptzero,
         check_quillbot,
         check_copyleaks,
@@ -557,6 +768,70 @@ def check_all():
             "avg_ai_percentage": avg_ai,
             "avg_human_percentage": round(100 - avg_ai, 1),
             "overall_verdict": _verdict(avg_ai),
+        }
+    })
+
+
+@app.route("/api/plagiarism", methods=["POST"])
+def check_plagiarism():
+    """Check text for plagiarism by searching for exact phrase matches."""
+    data = request.get_json()
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    if len(text) < 50:
+        return jsonify({"error": "Text too short. Need at least 50 characters."}), 400
+
+    # Split into sentences and group into 2-sentence chunks
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    i = 0
+    while i < len(sentences):
+        chunk = sentences[i].strip()
+        if i + 1 < len(sentences):
+            chunk += ' ' + sentences[i + 1].strip()
+            i += 2
+        else:
+            i += 1
+        if len(chunk) > 30:
+            chunks.append(chunk)
+
+    # Search each chunk concurrently
+    results = []
+    lock = threading.Lock()
+
+    def check_chunk(chunk):
+        matches = _search_web(chunk)
+        with lock:
+            results.append({
+                "text": chunk[:120] + ("..." if len(chunk) > 120 else ""),
+                "flagged": len(matches) > 0,
+                "matches": matches,
+            })
+
+    threads = []
+    for chunk in chunks[:10]:
+        t = threading.Thread(target=check_chunk, args=(chunk,))
+        threads.append(t)
+        t.start()
+        time.sleep(0.3)  # Stagger to avoid rate limiting
+
+    for t in threads:
+        t.join(timeout=20)
+
+    total = len(results)
+    flagged = sum(1 for r in results if r["flagged"])
+    plag_pct = round((flagged / total) * 100, 1) if total > 0 else 0
+
+    return jsonify({
+        "chunks": results,
+        "summary": {
+            "total_chunks": total,
+            "flagged_chunks": flagged,
+            "plagiarism_percentage": plag_pct,
+            "verdict": "No Plagiarism Detected" if plag_pct == 0
+                       else "Some Matches Found" if plag_pct < 50
+                       else "Significant Matches Found",
         }
     })
 
@@ -681,13 +956,7 @@ HTML_TEMPLATE = r'''
   /* ─── Humanizer ─── */
   .split-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   .panel-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
-  .strength-selector { display: flex; gap: 6px; margin-top: 12px; }
-  .strength-btn {
-    padding: 6px 14px; border-radius: 7px; font-size: 0.8rem;
-    border: 1px solid var(--border); background: var(--surface2);
-    color: var(--text-dim); cursor: pointer; font-weight: 600;
-  }
-  .strength-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(108,92,231,0.1); }
+  /* strength selector removed — using AI limit only */
 
   .diff-highlight {
     background: rgba(108, 92, 231, 0.08);
@@ -798,24 +1067,70 @@ HTML_TEMPLATE = r'''
   .target-input:focus { border-color: var(--accent); }
   .target-group .unit { font-size: 0.8rem; color: var(--text-dim); }
 
+  /* ─── Checkbox option ─── */
+  .check-option {
+    display: flex; align-items: center; gap: 6px; cursor: pointer;
+    font-size: 0.82rem; color: var(--text-dim); font-weight: 600;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 6px 12px; white-space: nowrap;
+  }
+  .check-option:hover { border-color: var(--accent); color: var(--text); }
+  .check-option input[type="checkbox"] {
+    accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer;
+  }
+
   /* ─── Iteration Log ─── */
   .iter-log {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 16px; margin-bottom: 16px; display: none;
+    border-radius: 12px; margin-bottom: 16px; display: none;
   }
   .iter-log.visible { display: block; }
-  .iter-log h4 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 10px; }
+  .iter-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px; cursor: pointer; user-select: none;
+  }
+  .iter-header:hover { background: var(--surface2); border-radius: 12px; }
+  .iter-header h4 { font-size: 0.9rem; color: var(--text-dim); margin: 0; }
+  .iter-arrow {
+    font-size: 1rem; color: var(--text-dim);
+    transition: transform 0.2s;
+    display: inline-block;
+  }
+  .iter-body { padding: 0 16px 14px; }
+  .iter-body.collapsed { display: none; }
   .iter-row {
     display: flex; align-items: center; gap: 10px;
     padding: 6px 0; border-bottom: 1px solid var(--border);
     font-size: 0.85rem;
   }
   .iter-row:last-child { border-bottom: none; }
+  .iter-row.best { background: rgba(0,184,148,0.08); border-radius: 6px; padding: 6px 8px; margin: 0 -8px; }
   .iter-num { color: var(--text-dim); font-family: monospace; min-width: 24px; }
+  .iter-scores { font-size: 0.75rem; color: var(--text-dim); min-width: 110px; font-family: monospace; }
   .iter-bar-wrap { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
   .iter-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
   .iter-pct { font-family: monospace; font-weight: 700; min-width: 45px; text-align: right; }
   .iter-check { font-size: 1rem; min-width: 20px; text-align: center; }
+
+  /* ─── Plagiarism Results ─── */
+  .plag-results { margin-bottom: 18px; }
+  .plag-chunk {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; margin-bottom: 10px;
+  }
+  .plag-chunk.flagged { border-left: 3px solid var(--red); }
+  .plag-chunk.clean { border-left: 3px solid var(--green); }
+  .plag-text { font-size: 0.88rem; color: var(--text); margin-bottom: 8px; line-height: 1.5; font-style: italic; }
+  .plag-status { font-size: 0.78rem; font-weight: 600; }
+  .plag-status.ok { color: var(--green); }
+  .plag-status.warn { color: var(--red); }
+  .plag-sources { margin-top: 6px; }
+  .plag-source {
+    font-size: 0.78rem; color: var(--cyan);
+    display: block; margin-top: 3px;
+    text-decoration: none; word-break: break-all;
+  }
+  .plag-source:hover { text-decoration: underline; }
 
   @media (max-width: 768px) {
     .split-panel { grid-template-columns: 1fr; }
@@ -836,6 +1151,7 @@ HTML_TEMPLATE = r'''
   <div class="tabs">
     <button class="tab active" onclick="switchTab('humanize')">✏️ Humanize</button>
     <button class="tab" onclick="switchTab('detect')">🔍 Detect</button>
+    <button class="tab" onclick="switchTab('plagiarism')">📝 Plagiarism</button>
     <button class="tab" onclick="switchTab('workflow')">⚡ Full Workflow</button>
   </div>
 
@@ -850,16 +1166,14 @@ HTML_TEMPLATE = r'''
             ✏️ Humanize
           </button>
           <button class="btn btn-ghost" onclick="document.getElementById('hInput').value=''">Clear</button>
-          <div class="strength-selector">
-            <button class="strength-btn active" data-passes="1" onclick="setStrength(this)">Light</button>
-            <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
-            <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
-          </div>
           <div class="target-group">
             <label>AI Limit</label>
             <input type="number" class="target-input" id="hTarget" value="0" min="0" max="100">
             <span class="unit">%</span>
           </div>
+          <label class="check-option" title="Remove em dashes, smart quotes, semicolons, and other AI-telltale characters">
+            <input type="checkbox" id="hStrip" checked> <span>Clean AI chars</span>
+          </label>
         </div>
       </div>
       <div>
@@ -872,7 +1186,10 @@ HTML_TEMPLATE = r'''
         </div>
       </div>
     </div>
-    <div class="iter-log" id="hIterLog"><h4>🔄 Iteration Log</h4><div class="iter-rows" id="hIterRows"></div></div>
+    <div class="iter-log" id="hIterLog">
+      <div class="iter-header" onclick="toggleIterLog('hIterLog')"><h4>🔄 Iteration Log</h4><span class="iter-arrow" id="hIterArrow">▶</span></div>
+      <div class="iter-body collapsed" id="hIterBody"><div class="iter-rows" id="hIterRows"></div></div>
+    </div>
     <div class="diff-highlight" id="hDiff" style="display:none"></div>
   </div>
 
@@ -926,31 +1243,77 @@ HTML_TEMPLATE = r'''
     </div>
   </div>
 
-  <!-- ═══ TAB 3: FULL WORKFLOW ═══ -->
+  <!-- ═══ TAB 3: PLAGIARISM ═══ -->
+  <div class="tab-content" id="tab-plagiarism">
+    <div class="card">
+      <textarea id="pInput" placeholder="Paste text to check for plagiarism...&#10;&#10;Searches for exact phrase matches online. Min 50 characters."></textarea>
+      <div class="controls">
+        <button class="btn btn-primary" id="plagBtn" onclick="runPlagiarism('pInput')">
+          📝 Check Plagiarism
+        </button>
+        <button class="btn btn-ghost" onclick="document.getElementById('pInput').value=''">Clear</button>
+        <button class="btn btn-ghost" onclick="copyField('pInput')">📋 Copy</button>
+        <span class="meta" id="pMeta"></span>
+      </div>
+    </div>
+
+    <div class="progress" id="plagProgress"><div class="fill"></div></div>
+    <div class="summary card" id="plagSummary">
+      <div class="summary-row">
+        <h3 style="font-size:1.05rem">Plagiarism Results</h3>
+        <span class="verdict-badge" id="pVerdict"></span>
+      </div>
+      <div class="meter-row">
+        <div>
+          <div class="meter-label"><span>✅ Original</span><span class="pct" id="pOrigPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill human" id="pOrigBar" style="width:0%"></div></div>
+        </div>
+        <div>
+          <div class="meter-label"><span>⚠️ Flagged</span><span class="pct" id="pFlagPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill ai" id="pFlagBar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div id="plagResults" class="plag-results"></div>
+
+    <div class="manual-section card">
+      <h4>🔗 Manual Plagiarism Check — copies text & opens checker site</h4>
+      <div class="manual-grid">
+        <a class="mbtn" onclick="openManual('pInput','https://www.quetext.com/')">Quetext ↗</a>
+        <a class="mbtn" onclick="openManual('pInput','https://www.grammarly.com/plagiarism-checker')">Grammarly ↗</a>
+        <a class="mbtn" onclick="openManual('pInput','https://www.duplichecker.com/')">DupliChecker ↗</a>
+        <a class="mbtn" onclick="openManual('pInput','https://smallseotools.com/plagiarism-checker/')">SmallSEOTools ↗</a>
+        <a class="mbtn" onclick="openManual('pInput','https://plagiarismdetector.net/')">PlagiarismDetector ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TAB 4: FULL WORKFLOW ═══ -->
   <div class="tab-content" id="tab-workflow">
     <div class="card">
-      <div class="panel-label">📥 Paste AI Text → Humanize → Detect (one click)</div>
-      <textarea id="wInput" placeholder="Paste your AI-generated text here...&#10;This will humanize it and then run it through all detectors automatically."></textarea>
+      <div class="panel-label">📥 Paste AI Text → Humanize → Detect → Plagiarism (one click)</div>
+      <textarea id="wInput" placeholder="Paste your AI-generated text here...&#10;This will humanize, detect AI, and check plagiarism automatically."></textarea>
       <div class="controls">
         <button class="btn btn-green" id="workflowBtn" onclick="runWorkflow()">
-          ⚡ Humanize & Detect
+          ⚡ Humanize & Detect & Plagiarism
         </button>
         <button class="btn btn-ghost" onclick="document.getElementById('wInput').value=''">Clear</button>
-        <div class="strength-selector">
-          <button class="strength-btn active" data-passes="1" onclick="setStrength(this)">Light</button>
-          <button class="strength-btn" data-passes="2" onclick="setStrength(this)">Medium</button>
-          <button class="strength-btn" data-passes="3" onclick="setStrength(this)">Strong</button>
-        </div>
         <div class="target-group">
           <label>AI Limit</label>
           <input type="number" class="target-input" id="wTarget" value="0" min="0" max="100">
           <span class="unit">%</span>
         </div>
+        <label class="check-option" title="Remove em dashes, smart quotes, semicolons, and other AI-telltale characters">
+          <input type="checkbox" id="wStrip" checked> <span>Clean AI chars</span>
+        </label>
       </div>
     </div>
 
     <div class="progress" id="wfProgress"><div class="fill"></div></div>
-    <div class="iter-log" id="wIterLog"><h4>🔄 Iteration Log</h4><div class="iter-rows" id="wIterRows"></div></div>
+    <div class="iter-log" id="wIterLog">
+      <div class="iter-header" onclick="toggleIterLog('wIterLog')"><h4>🔄 Iteration Log</h4><span class="iter-arrow" id="wIterArrow">▶</span></div>
+      <div class="iter-body collapsed" id="wIterBody"><div class="iter-rows" id="wIterRows"></div></div>
+    </div>
 
     <div class="card" id="wfHumanizedCard" style="display:none">
       <div class="panel-label">📤 Humanized Result</div>
@@ -979,6 +1342,24 @@ HTML_TEMPLATE = r'''
     </div>
     <div class="results-grid" id="wfResults"></div>
 
+    <div class="summary card" id="wfPlagSummary">
+      <div class="summary-row">
+        <h3 style="font-size:1.05rem">Plagiarism Results</h3>
+        <span class="verdict-badge" id="wpVerdict"></span>
+      </div>
+      <div class="meter-row">
+        <div>
+          <div class="meter-label"><span>✅ Original</span><span class="pct" id="wpOrigPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill human" id="wpOrigBar" style="width:0%"></div></div>
+        </div>
+        <div>
+          <div class="meter-label"><span>⚠️ Flagged</span><span class="pct" id="wpFlagPct">0%</span></div>
+          <div class="meter-track"><div class="meter-fill ai" id="wpFlagBar" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div id="wfPlagResults" class="plag-results"></div>
+
     <div class="manual-section card">
       <h4>🔗 Quick Manual Check — copies humanized text & opens detector site</h4>
       <div class="manual-grid">
@@ -1000,8 +1381,6 @@ HTML_TEMPLATE = r'''
 <div class="toast" id="toast"></div>
 
 <script>
-let currentPasses = 1;
-
 // ─── Tab switching ───
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -1030,10 +1409,13 @@ function openManual(inputId, url) {
   window.open(url, '_blank');
 }
 
-function setStrength(el) {
-  el.closest('.strength-selector').querySelectorAll('.strength-btn').forEach(b => b.classList.remove('active'));
-  el.classList.add('active');
-  currentPasses = parseInt(el.dataset.passes);
+function toggleIterLog(logId) {
+  const log = document.getElementById(logId);
+  const body = log.querySelector('.iter-body');
+  const arrow = log.querySelector('.iter-arrow');
+  body.classList.toggle('collapsed');
+  const isOpen = !body.classList.contains('collapsed');
+  arrow.textContent = isOpen ? '▼' : '▶';
 }
 
 function sendToDetect(outputId) {
@@ -1071,17 +1453,29 @@ function renderIterLog(logId, rowsId, iterations, target) {
   const log = document.getElementById(logId);
   const rows = document.getElementById(rowsId);
   log.classList.add('visible');
+  // Start collapsed with arrow
+  const body = log.querySelector('.iter-body');
+  const arrow = log.querySelector('.iter-arrow');
+  if (body) body.classList.add('collapsed');
+  if (arrow) arrow.textContent = '▶';
+  // Show iteration count in header
+  const header = log.querySelector('.iter-header h4');
+  if (header) header.textContent = '🔄 Iteration Log (' + iterations.length + ' iterations)';
   rows.innerHTML = '';
   iterations.forEach(it => {
-    const hit = it.ai_percentage <= target;
-    const color = it.ai_percentage <= 15 ? 'var(--green)' : it.ai_percentage <= 50 ? 'var(--yellow)' : 'var(--red)';
+    const pct = it.ai_percentage;
+    const hit = pct <= target;
+    const color = pct <= 15 ? 'var(--green)' : pct <= 50 ? 'var(--yellow)' : 'var(--red)';
     const row = document.createElement('div');
-    row.className = 'iter-row';
+    row.className = 'iter-row' + (it.is_best ? ' best' : '');
+    const zLabel = it.zerogpt !== null && it.zerogpt !== undefined ? 'Z:' + it.zerogpt + '%' : 'Z:—';
+    const sLabel = it.sapling !== null && it.sapling !== undefined ? 'S:' + it.sapling + '%' : 'S:—';
     row.innerHTML = `
       <span class="iter-num">#${it.iteration}</span>
-      <div class="iter-bar-wrap"><div class="iter-bar-fill" style="width:${it.ai_percentage}%;background:${color}"></div></div>
-      <span class="iter-pct" style="color:${color}">${it.ai_percentage}%</span>
-      <span class="iter-check">${hit ? '✅' : '🔄'}</span>
+      <span class="iter-scores">${zLabel} ${sLabel}</span>
+      <div class="iter-bar-wrap"><div class="iter-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="iter-pct" style="color:${color}">${pct}%</span>
+      <span class="iter-check">${it.is_best ? '⭐' : hit ? '✅' : '🔄'}</span>
     `;
     rows.appendChild(row);
   });
@@ -1105,11 +1499,14 @@ async function doHumanizeUntil(inputId, outputId, iterLogId, metaId) {
   const logEl = document.getElementById(iterLogId);
   logEl.classList.remove('visible');
 
+  const stripId = inputId === 'hInput' ? 'hStrip' : 'wStrip';
+  const stripSuspicious = document.getElementById(stripId)?.checked || false;
+
   try {
     const resp = await fetch('/api/humanize-until', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ text, passes: currentPasses, target, max_iterations: 10 }),
+      body: JSON.stringify({ text, target, strip_suspicious: stripSuspicious }),
     });
     const data = await resp.json();
     if (data.error) { toast(data.error); return; }
@@ -1125,17 +1522,18 @@ async function doHumanizeUntil(inputId, outputId, iterLogId, metaId) {
     const diff = document.getElementById('hDiff');
     if (diff && inputId === 'hInput') {
       diff.style.display = 'block';
-      const status = data.target_reached ? '✅ Target reached!' : '⚠️ Target not reached — try Strong mode';
+      const status = data.target_reached ? '✅ Target reached!' : '⚠️ Target not reached — try again or raise limit';
+      const bestNote = data.best_iteration !== data.total_iterations ? ' (best was iteration #' + data.best_iteration + ')' : '';
       diff.innerHTML = status + ' · ' +
-        data.total_iterations + ' iteration' + (data.total_iterations > 1 ? 's' : '') + ' · ' +
+        data.total_iterations + ' iteration' + (data.total_iterations > 1 ? 's' : '') + bestNote + ' · ' +
         'Final AI: <strong>' + data.final_ai_percentage + '%</strong> · ' +
         data.original_word_count + ' → ' + data.humanized_word_count + ' words';
     }
 
     if (data.target_reached) {
-      toast('✅ Hit target: ' + data.final_ai_percentage + '% AI');
+      toast('✅ Hit target: ' + data.final_ai_percentage + '% AI (best of ' + data.total_iterations + ' tries)');
     } else {
-      toast('⚠️ Best result: ' + data.final_ai_percentage + '% AI after ' + data.total_iterations + ' tries');
+      toast('⚠️ Best: ' + data.final_ai_percentage + '% AI (iteration #' + data.best_iteration + ')');
     }
   } catch(e) {
     toast('Error: ' + e.message);
@@ -1201,7 +1599,7 @@ async function runDetection(inputId, summaryId, resultsId, progressId) {
   summ.classList.remove('visible');
 
   // Loading placeholders
-  ['ZeroGPT','Sapling AI','GPTZero','Quillbot','Copyleaks','Scribbr'].forEach(n => {
+  ['ZeroGPT','Sapling AI','RoBERTa OpenAI','HC3 ChatGPT','GPTZero','Quillbot','Copyleaks','Scribbr'].forEach(n => {
     const c = document.createElement('div');
     c.className = 'result-card';
     c.style.opacity = '0.5';
@@ -1240,6 +1638,74 @@ async function runDetection(inputId, summaryId, resultsId, progressId) {
   }
 }
 
+// ─── Plagiarism Check ───
+async function runPlagiarism(inputId, summaryId, resultsId, progressId, prefix) {
+  summaryId = summaryId || 'plagSummary';
+  resultsId = resultsId || 'plagResults';
+  progressId = progressId || 'plagProgress';
+  prefix = prefix || 'p';
+
+  const text = document.getElementById(inputId).value.trim();
+  if (!text) { toast('Paste some text first'); return; }
+  if (text.length < 50) { toast('Need at least 50 characters'); return; }
+
+  const prog = document.getElementById(progressId);
+  const resultsEl = document.getElementById(resultsId);
+  const summ = document.getElementById(summaryId);
+
+  prog.classList.add('active');
+  resultsEl.innerHTML = '';
+  summ.classList.remove('visible');
+
+  try {
+    const resp = await fetch('/api/plagiarism', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text}),
+    });
+    const data = await resp.json();
+    if (data.error) { toast(data.error); return; }
+    renderPlagResults(data, summaryId, resultsId, prefix);
+  } catch(e) {
+    toast('Error: ' + e.message);
+  } finally {
+    prog.classList.remove('active');
+  }
+}
+
+function renderPlagResults(data, summaryId, resultsId, prefix) {
+  const resultsEl = document.getElementById(resultsId);
+  const summ = document.getElementById(summaryId);
+  const s = data.summary;
+
+  summ.classList.add('visible');
+  const origPct = Math.round(100 - s.plagiarism_percentage);
+  document.getElementById(prefix + 'OrigPct').textContent = origPct + '%';
+  document.getElementById(prefix + 'FlagPct').textContent = s.plagiarism_percentage + '%';
+  document.getElementById(prefix + 'OrigBar').style.width = origPct + '%';
+  document.getElementById(prefix + 'FlagBar').style.width = s.plagiarism_percentage + '%';
+  const vEl = document.getElementById(prefix + 'Verdict');
+  vEl.textContent = s.verdict;
+  vEl.className = 'verdict-badge ' + (s.plagiarism_percentage === 0 ? 'v-human' : s.plagiarism_percentage < 50 ? 'v-mixed' : 'v-ai');
+
+  resultsEl.innerHTML = '';
+  data.chunks.forEach(chunk => {
+    const div = document.createElement('div');
+    div.className = 'plag-chunk ' + (chunk.flagged ? 'flagged' : 'clean');
+    let html = '<div class="plag-text">"' + chunk.text + '"</div>';
+    html += '<div class="plag-status ' + (chunk.flagged ? 'warn' : 'ok') + '">' + (chunk.flagged ? '⚠️ Potential match found' : '✅ No matches found') + '</div>';
+    if (chunk.matches && chunk.matches.length > 0) {
+      html += '<div class="plag-sources">';
+      chunk.matches.forEach(m => {
+        html += '<a class="plag-source" href="' + m.url + '" target="_blank">' + m.title + ' ↗</a>';
+      });
+      html += '</div>';
+    }
+    div.innerHTML = html;
+    resultsEl.appendChild(div);
+  });
+}
+
 // ─── Full Workflow ───
 async function runWorkflow() {
   const input = document.getElementById('wInput');
@@ -1257,13 +1723,16 @@ async function runWorkflow() {
   document.getElementById('wfSummary').classList.remove('visible');
   document.getElementById('wfResults').innerHTML = '';
   document.getElementById('wIterLog').classList.remove('visible');
+  document.getElementById('wfPlagSummary').classList.remove('visible');
+  document.getElementById('wfPlagResults').innerHTML = '';
 
   try {
     // Step 1: Humanize until target
+    const stripSuspicious = document.getElementById('wStrip')?.checked || false;
     const hResp = await fetch('/api/humanize-until', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({text, passes: currentPasses, target, max_iterations: 10}),
+      body: JSON.stringify({text, target, strip_suspicious: stripSuspicious}),
     });
     const hData = await hResp.json();
     if (hData.error) { toast(hData.error); return; }
@@ -1308,11 +1777,24 @@ async function runWorkflow() {
       vEl.className = 'verdict-badge ' + verdictClass(s.overall_verdict);
     }
 
+    // Step 3: Plagiarism check on humanized text
+    btn.innerHTML = '<span class="spinner"></span> Checking plagiarism...';
+
+    const pResp = await fetch('/api/plagiarism', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: hData.humanized}),
+    });
+    const pData = await pResp.json();
+    if (!pData.error) {
+      renderPlagResults(pData, 'wfPlagSummary', 'wfPlagResults', 'wp');
+    }
+
   } catch(e) {
     toast('Error: ' + e.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '⚡ Humanize & Detect';
+    btn.innerHTML = '⚡ Humanize & Detect & Plagiarism';
     prog.classList.remove('active');
   }
 }
@@ -1321,8 +1803,9 @@ async function runWorkflow() {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     const active = document.querySelector('.tab-content.active');
-    if (active.id === 'tab-humanize') doHumanize('hInput','hOutput');
+    if (active.id === 'tab-humanize') doHumanizeUntil('hInput','hOutput','hIterLog','hMeta');
     else if (active.id === 'tab-detect') runDetection('dInput');
+    else if (active.id === 'tab-plagiarism') runPlagiarism('pInput');
     else if (active.id === 'tab-workflow') runWorkflow();
   }
 });
