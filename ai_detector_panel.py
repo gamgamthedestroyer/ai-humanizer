@@ -617,7 +617,7 @@ def humanize():
 @app.route("/api/humanize-until", methods=["POST"])
 def humanize_until():
     """Iteratively humanize text until it hits a target AI % threshold.
-    Cross-references ZeroGPT AND Sapling — uses the MAX (worst) score."""
+    Uses ZeroGPT as the detector for each iteration."""
     data = request.get_json()
     text = data.get("text", "").strip()
     target = float(data.get("target", 0))
@@ -648,37 +648,14 @@ def humanize_until():
         if strip_chars:
             current_text = strip_suspicious_chars(current_text)
 
-        # Cross-reference BOTH detectors concurrently
-        zerogpt_result = {"status": "error"}
-        sapling_result = {"status": "error"}
-        threads = []
+        # Check with ZeroGPT
+        zerogpt_result = check_zerogpt(current_text)
 
-        def run_zero():
-            nonlocal zerogpt_result
-            zerogpt_result = check_zerogpt(current_text)
-
-        def run_sapling():
-            nonlocal sapling_result
-            sapling_result = check_sapling(current_text)
-
-        t1 = threading.Thread(target=run_zero)
-        t2 = threading.Thread(target=run_sapling)
-        threads = [t1, t2]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=35)
-
-        # Get scores from both, use AVERAGE for target check
-        z_pct = zerogpt_result.get("ai_percentage", 100.0) if zerogpt_result["status"] == "success" else None
-        s_pct = sapling_result.get("ai_percentage", 100.0) if sapling_result["status"] == "success" else None
-
-        scores = [p for p in [z_pct, s_pct] if p is not None]
-        avg_pct = round(sum(scores) / len(scores), 1) if scores else 100.0
-        max_pct = max(scores) if scores else 100.0
+        z_pct = zerogpt_result.get("ai_percentage", 100.0) if zerogpt_result.get("status") == "success" else None
+        avg_pct = round(z_pct, 1) if z_pct is not None else 100.0
 
         # Track consecutive detector failures
-        if not scores:
+        if z_pct is None:
             consecutive_errors += 1
             if consecutive_errors >= 5:
                 stop_reason = "detectors_failed"
@@ -689,9 +666,7 @@ def humanize_until():
         iterations.append({
             "iteration": i + 1,
             "ai_percentage": avg_pct,
-            "max_percentage": max_pct,
             "zerogpt": round(z_pct, 1) if z_pct is not None else None,
-            "sapling": round(s_pct, 1) if s_pct is not None else None,
             "verdict": _verdict(avg_pct),
             "word_count": len(current_text.split()),
             "text_snapshot": current_text,
@@ -754,7 +729,6 @@ def check_all():
 
     detectors = [
         check_zerogpt,
-        check_sapling,
         check_roberta_openai,
         check_hc3_chatgpt,
         check_gptzero,
@@ -1259,7 +1233,7 @@ HTML_TEMPLATE = r'''
         <a class="mbtn" onclick="openManual('dInput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://www.scribbr.com/ai-detector/')">Scribbr ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://originality.ai/')">Originality.ai ↗</a>
-        <a class="mbtn" onclick="openManual('dInput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+
         <a class="mbtn" onclick="openManual('dInput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://contentdetector.ai/')">ContentDetector ↗</a>
         <a class="mbtn" onclick="openManual('dInput','https://undetectable.ai/')">Undetectable.ai ↗</a>
@@ -1393,7 +1367,7 @@ HTML_TEMPLATE = r'''
         <a class="mbtn" onclick="openManual('wOutput','https://copyleaks.com/ai-content-detector')">Copyleaks ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://www.scribbr.com/ai-detector/')">Scribbr ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://originality.ai/')">Originality.ai ↗</a>
-        <a class="mbtn" onclick="openManual('wOutput','https://sapling.ai/ai-content-detector')">Sapling AI ↗</a>
+
         <a class="mbtn" onclick="openManual('wOutput','https://writer.com/ai-content-detector/')">Writer.com ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://contentdetector.ai/')">ContentDetector ↗</a>
         <a class="mbtn" onclick="openManual('wOutput','https://undetectable.ai/')">Undetectable.ai ↗</a>
@@ -1493,10 +1467,9 @@ function renderIterLog(logId, rowsId, iterations, target) {
     const row = document.createElement('div');
     row.className = 'iter-row' + (it.is_best ? ' best' : '');
     const zLabel = it.zerogpt !== null && it.zerogpt !== undefined ? 'Z:' + it.zerogpt + '%' : 'Z:—';
-    const sLabel = it.sapling !== null && it.sapling !== undefined ? 'S:' + it.sapling + '%' : 'S:—';
     row.innerHTML = `
       <span class="iter-num">#${it.iteration}</span>
-      <span class="iter-scores">${zLabel} ${sLabel}</span>
+      <span class="iter-scores">${zLabel}</span>
       <div class="iter-bar-wrap"><div class="iter-bar-fill" style="width:${pct}%;background:${color}"></div></div>
       <span class="iter-pct" style="color:${color}">${pct}%</span>
       <span class="iter-check">${it.is_best ? '⭐' : hit ? '✅' : '🔄'}</span>
