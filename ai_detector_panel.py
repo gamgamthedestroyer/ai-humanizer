@@ -17,16 +17,119 @@ from flask import Flask, render_template_string, request, jsonify
 app = Flask(__name__)
 
 # ─── Text Humanizer Engine ────────────────────────────────────────────────────
+# Based on Wikipedia "Signs of AI writing" — comprehensive AI signal removal
 
-# Overused AI transition phrases → more natural replacements
+# ── Significance / legacy puffery phrases ───────────────────────────────────
+# LLMs puff up importance with formulaic legacy/significance language
+PUFFERY_SWAPS = {
+    r'\bstands as a\b': lambda: random.choice(["is a", "is basically a", "works as a"]),
+    r'\bserves as a\b': lambda: random.choice(["is a", "works as a", "acts as a"]),
+    r'\bmarks a\b': lambda: random.choice(["is a", "was a", "became a"]),
+    r'\brepresents a\b': lambda: random.choice(["is a", "shows a", "amounts to a"]),
+    r'\bis a testament to\b': lambda: random.choice(["shows", "proves", "reflects"]),
+    r'\bremains a testament to\b': lambda: random.choice(["still shows", "still reflects"]),
+    r'\ba testament to\b': lambda: random.choice(["proof of", "a sign of", "evidence of"]),
+    r'\breflects broader\b': lambda: random.choice(["connects to wider", "ties into bigger", "relates to"]),
+    r'\breflects the broader\b': lambda: random.choice(["connects to the wider", "ties into the bigger"]),
+    r'\bsymbolizing its\b': lambda: random.choice(["showing its", "reflecting its"]),
+    r'\bcontributing to the\b': lambda: random.choice(["adding to the", "helping the", "feeding into the"]),
+    r'\bsetting the stage for\b': lambda: random.choice(["leading to", "opening the door to", "making way for"]),
+    r'\bmarking a pivotal\b': lambda: random.choice(["becoming an important", "at a key"]),
+    r'\bmarking a significant\b': lambda: random.choice(["becoming a major", "at an important"]),
+    r'\bshaping the\b': lambda: random.choice(["influencing the", "affecting the", "changing the"]),
+    r'\ba key turning point\b': lambda: random.choice(["a big change", "a shift", "a turning point"]),
+    r'\bevolving landscape\b': lambda: random.choice(["changing scene", "shifting field", "moving world"]),
+    r'\bfocal point\b': lambda: random.choice(["center", "focus", "main point"]),
+    r'\bindelible mark\b': lambda: random.choice(["lasting impact", "permanent effect", "real stamp"]),
+    r'\bdeeply rooted\b': lambda: random.choice(["well established", "long-standing", "firmly set"]),
+    r'\benduring legacy\b': lambda: random.choice(["lasting impact", "long influence", "continued effect"]),
+    r'\blasting legacy\b': lambda: random.choice(["lasting impact", "long influence"]),
+    r'\bongoing legacy\b': lambda: random.choice(["continuing impact", "lasting influence"]),
+    r'\bplays a crucial role\b': lambda: random.choice(["matters a lot", "is really important", "makes a big difference"]),
+    r'\bplays a pivotal role\b': lambda: random.choice(["matters a lot", "is key", "is really important"]),
+    r'\bplays a significant role\b': lambda: random.choice(["matters a lot", "is important", "has a big part"]),
+    r'\bplays a vital role\b': lambda: random.choice(["is essential", "is really important", "matters a lot"]),
+    r'\bplays a key role\b': lambda: random.choice(["is key", "matters", "is important"]),
+    r'\bplayed a crucial role\b': lambda: random.choice(["mattered a lot", "was really important"]),
+    r'\bplayed a pivotal role\b': lambda: random.choice(["mattered a lot", "was key"]),
+    r'\bplayed a significant role\b': lambda: random.choice(["mattered", "was important"]),
+    r'\ba pivotal moment\b': lambda: random.choice(["a big moment", "a key moment", "an important point"]),
+    r'\ba significant shift\b': lambda: random.choice(["a big change", "a major change", "a real shift"]),
+    r'\bholding a pivotal place\b': lambda: random.choice(["being an important part of", "sitting at the center of"]),
+    r'\bhas long been\b': lambda: random.choice(["has been", "was always", "has stayed"]),
+    r'\bpart of a broader\b': lambda: random.choice(["part of a wider", "part of a bigger", "tied to a larger"]),
+    r'\bpart of a broader movement\b': lambda: random.choice(["part of a wider push", "tied to a bigger trend"]),
+}
+
+# ── Promotional / advertisement-like language ───────────────────────────────
+# LLMs write like travel guides and press releases
+PROMOTIONAL_SWAPS = {
+    r'\bboasts a\b': lambda: random.choice(["has a", "comes with a", "includes a"]),
+    r'\bboasts\b': lambda: random.choice(["has", "includes", "comes with"]),
+    r'\bnestled\b': lambda: random.choice(["located", "sitting", "tucked", "set"]),
+    r'\bin the heart of\b': lambda: random.choice(["in the center of", "in the middle of", "in downtown"]),
+    r'\bshowcasing\b': lambda: random.choice(["showing", "displaying", "presenting"]),
+    r'\bshowcases\b': lambda: random.choice(["shows", "displays", "presents"]),
+    r'\bshowcased\b': lambda: random.choice(["showed", "displayed", "presented"]),
+    r'\bexemplifies\b': lambda: random.choice(["shows", "represents", "is a good example of"]),
+    r'\bexemplify\b': lambda: random.choice(["show", "represent", "demonstrate"]),
+    r'\bcommitment to\b': lambda: random.choice(["focus on", "dedication to", "push for"]),
+    r'\bnatural beauty\b': lambda: random.choice(["scenery", "landscape", "surroundings"]),
+    r'\bdiverse array\b': lambda: random.choice(["wide range", "mix", "variety"]),
+    r'\bdiverse range\b': lambda: random.choice(["wide range", "mix", "variety"]),
+    r'\brich tapestry\b': lambda: random.choice(["mix", "blend", "combination"]),
+    r'\brich heritage\b': lambda: random.choice(["long history", "deep roots", "heritage"]),
+    r'\brich cultural heritage\b': lambda: random.choice(["deep cultural roots", "long cultural history"]),
+    r'\brich history\b': lambda: random.choice(["long history", "deep history", "storied past"]),
+    r'\bcaptivates\b': lambda: random.choice(["draws in", "interests", "attracts"]),
+    r'\bcaptivating\b': lambda: random.choice(["interesting", "engaging", "compelling"]),
+    r'\bdynamic hub\b': lambda: random.choice(["busy center", "active center", "hub"]),
+    r'\bvibrant community\b': lambda: random.choice(["active community", "lively community"]),
+    r'\bvibrant culture\b': lambda: random.choice(["active culture", "lively culture"]),
+    r'\bvibrant\b': lambda: random.choice(["lively", "active", "colorful", "energetic"]),
+    r'\bstunning\b': lambda: random.choice(["impressive", "striking", "remarkable"]),
+    r'\bbreathe?taking\b': lambda: random.choice(["impressive", "amazing", "remarkable"]),
+    r'\bawe-inspiring\b': lambda: random.choice(["impressive", "remarkable", "incredible"]),
+    r'\biconic\b': lambda: random.choice(["well-known", "classic", "famous", "recognizable"]),
+}
+
+# ── Didactic disclaimers / unnecessary hedging ──────────────────────────────
+# LLMs insert unnecessary "it's important to note" type phrases
+DIDACTIC_SWAPS = {
+    r"\bIt is important to note that\b": lambda: random.choice(["Worth mentioning —", "The thing is,", "Keep in mind that"]),
+    r"\bIt is worth noting that\b": lambda: random.choice(["Notably,", "Here's the thing —", "Worth pointing out,"]),
+    r"\bIt'?s important to note that\b": lambda: random.choice(["Worth mentioning —", "The thing is,", "Keep in mind,"]),
+    r"\bIt'?s worth noting that\b": lambda: random.choice(["Notably,", "One thing to flag:", "Worth pointing out,"]),
+    r"\bIt is crucial to remember that\b": lambda: random.choice(["Don't forget that", "Keep in mind that", "Remember,"]),
+    r"\bIt should be noted that\b": lambda: random.choice(["Note that", "To be clear,", "For context,"]),
+    r"\bIt is essential to\b": lambda: random.choice(["You need to", "It's key to", "You have to"]),
+    r"\bIt bears mentioning that\b": lambda: random.choice(["Also,", "On top of that,", "Worth saying:"]),
+    r"\bIt is crucial to\b": lambda: random.choice(["You need to", "It's key to", "The important thing is to"]),
+}
+
+# ── Vague attributions ──────────────────────────────────────────────────────
+# LLMs attribute things to vague unnamed authorities
+VAGUE_ATTRIBUTION_SWAPS = {
+    r'\bIndustry reports suggest\b': lambda: random.choice(["Reports say", "Some data shows", "Evidence suggests"]),
+    r'\bIndustry reports indicate\b': lambda: random.choice(["Reports say", "Some data shows"]),
+    r'\bObservers have cited\b': lambda: random.choice(["Some have pointed to", "People have noted"]),
+    r'\bObservers have noted\b': lambda: random.choice(["Some have pointed out", "People have noted"]),
+    r'\bExperts argue\b': lambda: random.choice(["Some say", "The argument goes", "People argue"]),
+    r'\bExperts suggest\b': lambda: random.choice(["Some say", "The thinking is", "People suggest"]),
+    r'\bExperts believe\b': lambda: random.choice(["Some think", "Many believe", "People think"]),
+    r'\bSome critics argue\b': lambda: random.choice(["Critics say", "Some push back, saying", "Skeptics point out"]),
+    r'\bScholars have noted\b': lambda: random.choice(["Researchers have found", "Academics point out"]),
+    r'\bAnalysts note that\b': lambda: random.choice(["Some note that", "People point out that"]),
+    r'\bResearchers have found\b': lambda: random.choice(["Studies show", "Research shows"]),
+}
+
+# ── Overused AI transition phrases → natural replacements ───────────────────
 TRANSITION_SWAPS = {
     r'\bFurthermore\b': lambda: random.choice(["On top of that", "What's more", "And", "Plus"]),
     r'\bAdditionally\b': lambda: random.choice(["Also", "And", "Beyond that", "On top of this"]),
     r'\bMoreover\b': lambda: random.choice(["And", "What's more", "On top of that", "Plus"]),
     r'\bIn conclusion\b': lambda: random.choice(["All in all", "At the end of the day", "So really", "Looking at the big picture"]),
     r'\bIn summary\b': lambda: random.choice(["To sum it up", "Pulling it all together", "So basically", "Bottom line"]),
-    r'\bIt is important to note that\b': lambda: random.choice(["Worth mentioning —", "The thing is,", "One key detail:", "Keep in mind that"]),
-    r'\bIt is worth noting that\b': lambda: random.choice(["Notably,", "Here's the thing —", "One thing to flag:", "Worth pointing out,"]),
     r'\bConsequently\b': lambda: random.choice(["So", "Because of that", "As a result", "That meant"]),
     r'\bNevertheless\b': lambda: random.choice(["Still", "Even so", "That said", "But"]),
     r'\bNonetheless\b': lambda: random.choice(["Still", "Even so", "That said", "But even then"]),
@@ -35,59 +138,120 @@ TRANSITION_SWAPS = {
     r'\bHowever\b': lambda: random.choice(["But", "That said", "Then again", "On the flip side"]),
     r'\bSpecifically\b': lambda: random.choice(["In particular", "To be exact", "More precisely", "Namely"]),
     r'\bUndoubtedly\b': lambda: random.choice(["Without question", "Clearly", "No doubt", "For sure"]),
-    r'\bSignificantly\b': lambda: random.choice(["Noticeably", "In a big way", "Quite a bit", "Considerably"]),
+    r'\bSignificantly\b': lambda: random.choice(["Noticeably", "In a big way", "Quite a bit"]),
     r'\bIn order to\b': lambda: random.choice(["To", "So as to", "For"]),
     r'\bDue to the fact that\b': lambda: random.choice(["Because", "Since", "Given that"]),
     r'\bIn the realm of\b': lambda: random.choice(["In", "When it comes to", "Within"]),
-    r'\bIt is essential to\b': lambda: random.choice(["You need to", "It's key to", "The important thing is to"]),
     r'\bIn today\'s world\b': lambda: random.choice(["These days", "Right now", "Nowadays"]),
-    r'\bIn today\'s society\b': lambda: random.choice(["These days", "Nowadays", "In the world we live in now"]),
+    r'\bIn today\'s society\b': lambda: random.choice(["These days", "Nowadays"]),
     r'\bHas the potential to\b': lambda: random.choice(["Could", "Might", "Can"]),
     r'\bA wide range of\b': lambda: random.choice(["All sorts of", "Many different", "A mix of", "Various"]),
-    r'\bPlays a crucial role\b': lambda: random.choice(["matters a lot", "is really important", "makes a big difference"]),
     r'\bIt is evident that\b': lambda: random.choice(["Clearly,", "You can see that", "It's pretty clear that"]),
-    r'\bServes as a\b': lambda: random.choice(["works as a", "acts as a", "functions as a", "is basically a"]),
+    r'\bDespite its\b': lambda: random.choice(["Even with its", "For all its", "With all its"]),
+    r'\bDespite these challenges\b': lambda: random.choice(["Even with these issues", "Challenges aside", "Problems and all"]),
+    r'\bDespite this\b': lambda: random.choice(["Even so", "Still", "That said"]),
+    r'\bIn light of\b': lambda: random.choice(["Given", "Because of", "Considering"]),
+    r'\bWith regard to\b': lambda: random.choice(["About", "On", "When it comes to"]),
+    r'\bWith respect to\b': lambda: random.choice(["About", "On", "For"]),
+    r'\bIn terms of\b': lambda: random.choice(["For", "When it comes to", "As far as"]),
+    r'\bAs a result of\b': lambda: random.choice(["Because of", "Thanks to", "Due to"]),
+    r'\bOn the other hand\b': lambda: random.choice(["Then again", "But", "At the same time"]),
+    r'\bIn addition to\b': lambda: random.choice(["Besides", "Along with", "On top of"]),
 }
 
-# Overused AI words → more natural alternatives
+# ── Overused AI vocabulary → natural alternatives ───────────────────────────
 WORD_SWAPS = {
+    # Classic AI corporate-speak
     r'\butilize\b': lambda: random.choice(["use", "rely on", "work with"]),
     r'\butilized\b': lambda: random.choice(["used", "relied on", "worked with"]),
     r'\butilizing\b': lambda: random.choice(["using", "relying on", "working with"]),
     r'\butilization\b': lambda: random.choice(["use", "usage"]),
     r'\bimplement\b': lambda: random.choice(["set up", "roll out", "put in place", "build"]),
+    r'\bimplements\b': lambda: random.choice(["sets up", "rolls out", "puts in place", "builds"]),
     r'\bimplemented\b': lambda: random.choice(["set up", "rolled out", "put in place", "built"]),
+    r'\bimplementing\b': lambda: random.choice(["setting up", "rolling out", "building"]),
     r'\bimplementation\b': lambda: random.choice(["setup", "rollout", "execution"]),
     r'\bleverage\b': lambda: random.choice(["use", "take advantage of", "tap into"]),
+    r'\bleverages\b': lambda: random.choice(["uses", "takes advantage of", "taps into"]),
+    r'\bleveraged\b': lambda: random.choice(["used", "took advantage of", "tapped into"]),
     r'\bleveraging\b': lambda: random.choice(["using", "taking advantage of", "tapping into"]),
     r'\bfacilitate\b': lambda: random.choice(["help with", "make easier", "support"]),
+    r'\bfacilitates\b': lambda: random.choice(["helps with", "makes easier", "supports"]),
     r'\bfacilitated\b': lambda: random.choice(["helped with", "made easier", "supported"]),
+    r'\bfacilitating\b': lambda: random.choice(["helping with", "making easier", "supporting"]),
     r'\benhance\b': lambda: random.choice(["improve", "boost", "strengthen"]),
+    r'\benhances\b': lambda: random.choice(["improves", "boosts", "strengthens"]),
     r'\benhanced\b': lambda: random.choice(["improved", "boosted", "strengthened"]),
+    r'\benhancing\b': lambda: random.choice(["improving", "boosting", "strengthening"]),
     r'\boptimize\b': lambda: random.choice(["improve", "fine-tune", "streamline"]),
+    r'\boptimizes\b': lambda: random.choice(["improves", "fine-tunes", "streamlines"]),
     r'\boptimized\b': lambda: random.choice(["improved", "fine-tuned", "streamlined"]),
+    r'\boptimizing\b': lambda: random.choice(["improving", "fine-tuning", "streamlining"]),
     r'\brobust\b': lambda: random.choice(["solid", "strong", "reliable"]),
     r'\bseamless\b': lambda: random.choice(["smooth", "effortless", "clean"]),
     r'\bseamlessly\b': lambda: random.choice(["smoothly", "without friction", "cleanly"]),
     r'\bcomprehensive\b': lambda: random.choice(["thorough", "full", "complete", "in-depth"]),
     r'\binnovative\b': lambda: random.choice(["creative", "fresh", "new", "original"]),
     r'\bgroundbreaking\b': lambda: random.choice(["major", "game-changing", "huge"]),
-    r'\bcutting-edge\b': lambda: random.choice(["latest", "modern", "advanced", "state-of-the-art"]),
-    r'\bparadigm\b': lambda: random.choice(["model", "framework", "approach"]),
+    r'\bcutting-edge\b': lambda: random.choice(["latest", "modern", "advanced"]),
     r'\bparadigm shift\b': lambda: random.choice(["major change", "big shift", "turning point"]),
+    r'\bparadigm\b': lambda: random.choice(["model", "framework", "approach"]),
     r'\bsynergy\b': lambda: random.choice(["collaboration", "combined effort", "teamwork"]),
     r'\bholistic\b': lambda: random.choice(["overall", "complete", "big-picture"]),
-    r'\bpivotal\b': lambda: random.choice(["key", "critical", "turning-point"]),
     r'\bmultifaceted\b': lambda: random.choice(["complex", "layered", "many-sided"]),
+
+    # Wikipedia article top AI vocabulary signals
+    r'\bbolstered\b': lambda: random.choice(["strengthened", "supported", "backed up"]),
+    r'\bbolster\b': lambda: random.choice(["strengthen", "support", "back up"]),
+    r'\bbolsters\b': lambda: random.choice(["strengthens", "supports", "backs up"]),
+    r'\bbolstering\b': lambda: random.choice(["strengthening", "supporting", "backing up"]),
+    r'\bfostering\b': lambda: random.choice(["building", "encouraging", "growing"]),
+    r'\bfoster\b': lambda: random.choice(["build", "encourage", "grow", "support"]),
+    r'\bfosters\b': lambda: random.choice(["builds", "encourages", "grows", "supports"]),
+    r'\bfostered\b': lambda: random.choice(["built", "encouraged", "grew"]),
+    r'\bgarnered\b': lambda: random.choice(["got", "earned", "picked up", "attracted"]),
+    r'\bgarner\b': lambda: random.choice(["get", "earn", "pick up", "attract"]),
+    r'\bgarners\b': lambda: random.choice(["gets", "earns", "picks up", "attracts"]),
+    r'\bgarnering\b': lambda: random.choice(["getting", "earning", "picking up"]),
+    r'\binterplay\b': lambda: random.choice(["interaction", "connection", "back-and-forth"]),
+    r'\bintricate\b': lambda: random.choice(["complex", "detailed", "involved"]),
+    r'\bintricacies\b': lambda: random.choice(["complexities", "details", "ins and outs"]),
+    r'\btapestry\b': lambda: random.choice(["mix", "blend", "combination"]),
+    r'\btestament\b': lambda: random.choice(["proof", "sign", "evidence"]),
+    r'\bunderscore\b': lambda: random.choice(["stress", "show", "point to"]),
+    r'\bunderscores\b': lambda: random.choice(["stresses", "shows", "points to"]),
+    r'\bunderscored\b': lambda: random.choice(["stressed", "showed", "pointed to"]),
+    r'\bunderscoring\b': lambda: random.choice(["stressing", "showing", "pointing to"]),
+    r'\bvaluable\b': lambda: random.choice(["useful", "helpful", "worthwhile"]),
+    r'\balign with\b': lambda: random.choice(["match", "fit with", "go along with"]),
+    r'\baligns with\b': lambda: random.choice(["matches", "fits with", "goes along with"]),
+    r'\baligned with\b': lambda: random.choice(["matched", "fit with", "went along with"]),
+    r'\baligning\b': lambda: random.choice(["matching", "fitting", "lining up"]),
+    r'\bresonate with\b': lambda: random.choice(["connect with", "appeal to", "speak to"]),
+    r'\bresonates with\b': lambda: random.choice(["connects with", "appeals to", "speaks to"]),
+    r'\bresonates\b': lambda: random.choice(["connects", "appeals", "hits home"]),
+    r'\bresonated with\b': lambda: random.choice(["connected with", "appealed to", "spoke to"]),
+    r'\bresonated\b': lambda: random.choice(["connected", "hit home", "landed"]),
+    r'\bresonating with\b': lambda: random.choice(["connecting with", "appealing to", "speaking to"]),
+    r'\benduring\b': lambda: random.choice(["lasting", "long-standing", "persistent"]),
+    r'\bcrucial\b': lambda: random.choice(["key", "important", "critical", "essential"]),
+    r'\bpivotal\b': lambda: random.choice(["key", "critical", "important"]),
+
+    # Copulative avoidance - LLMs avoid "is"/"has" and substitute fancier verbs
+    r'\bfeatures\b': lambda: random.choice(["has", "includes", "comes with"]),
+    r'\bfeaturing\b': lambda: random.choice(["with", "including", "that has"]),
+
+    # More overused AI words
     r'\bdelve\b': lambda: random.choice(["dig into", "look at", "explore", "get into"]),
     r'\bdelving\b': lambda: random.choice(["digging into", "looking at", "exploring"]),
+    r'\bdelved\b': lambda: random.choice(["dug into", "looked at", "explored"]),
     r'\bmeticulous\b': lambda: random.choice(["careful", "detailed", "thorough"]),
     r'\bmeticulously\b': lambda: random.choice(["carefully", "with care", "thoroughly"]),
     r'\bplethora\b': lambda: random.choice(["ton", "lot", "bunch", "plenty"]),
     r'\bmyriad\b': lambda: random.choice(["many", "countless", "all kinds of"]),
-    r'\blandscape\b': lambda: random.choice(["space", "scene", "world", "field"]),
-    r'\bfundamentally\b': lambda: random.choice(["at its core", "basically", "at a deep level"]),
-    r'\bunprecedented\b': lambda: random.choice(["never-before-seen", "unheard-of", "first-of-its-kind", "remarkable"]),
+    r'\blandscape\b': lambda: random.choice(["scene", "world", "field", "area"]),
+    r'\bfundamentally\b': lambda: random.choice(["at its core", "basically", "really"]),
+    r'\bunprecedented\b': lambda: random.choice(["never-before-seen", "unheard-of", "remarkable"]),
     r'\btransformative\b': lambda: random.choice(["game-changing", "major", "powerful"]),
     r'\brealm\b': lambda: random.choice(["area", "space", "world", "domain"]),
     r'\bcommence\b': lambda: random.choice(["start", "begin", "kick off"]),
@@ -99,6 +263,33 @@ WORD_SWAPS = {
     r'\bnotwithstanding\b': lambda: random.choice(["despite", "even with", "regardless of"]),
     r'\baforementioned\b': lambda: random.choice(["mentioned earlier", "noted above", "previous"]),
     r'\bhenceforth\b': lambda: random.choice(["from now on", "going forward", "from here on"]),
+    r'\brenowned\b': lambda: random.choice(["well-known", "famous", "noted"]),
+    r'\bprofound\b': lambda: random.choice(["deep", "big", "major", "serious"]),
+    r'\bprofoundly\b': lambda: random.choice(["deeply", "seriously", "greatly"]),
+    r'\bimbued\b': lambda: random.choice(["filled", "loaded", "infused"]),
+    r'\bembodying\b': lambda: random.choice(["representing", "capturing", "showing"]),
+    r'\bembodies\b': lambda: random.choice(["represents", "captures", "shows"]),
+    r'\bembodied\b': lambda: random.choice(["represented", "captured", "showed"]),
+    r'\bhighlighting\b': lambda: random.choice(["showing", "pointing out", "noting"]),
+    r'\bhighlights\b': lambda: random.choice(["shows", "points out", "brings out"]),
+    r'\bhighlighted\b': lambda: random.choice(["showed", "pointed out", "brought out"]),
+    r'\bemphasizing\b': lambda: random.choice(["stressing", "focusing on", "putting weight on"]),
+    r'\bemphasizes\b': lambda: random.choice(["stresses", "focuses on", "puts weight on"]),
+    r'\bemphasized\b': lambda: random.choice(["stressed", "focused on", "put weight on"]),
+    r'\bencompassing\b': lambda: random.choice(["covering", "including", "spanning"]),
+    r'\bencompasses\b': lambda: random.choice(["covers", "includes", "spans"]),
+    r'\bcultivating\b': lambda: random.choice(["building", "growing", "developing"]),
+    r'\bcultivates\b': lambda: random.choice(["builds", "grows", "develops"]),
+    r'\bcultivated\b': lambda: random.choice(["built", "grew", "developed"]),
+    r'\bshowcase\b': lambda: random.choice(["show", "display", "present"]),
+    r'\bshowcased\b': lambda: random.choice(["showed", "displayed", "presented"]),
+    r'\bnuanced\b': lambda: random.choice(["subtle", "detailed", "complex"]),
+    r'\bnuances\b': lambda: random.choice(["subtleties", "details", "fine points"]),
+    r'\bmultitude\b': lambda: random.choice(["many", "lot", "bunch", "range"]),
+    r'\bthoughtfully\b': lambda: random.choice(["carefully", "with care", "deliberately"]),
+    r'\bthoughtful\b': lambda: random.choice(["careful", "considered", "deliberate"]),
+    r'\bsocio-economic\b': lambda: random.choice(["social and economic", "economic and social"]),
+    r'\boperational efficiency\b': lambda: random.choice(["efficiency", "how well things run"]),
 }
 
 # Human-style hedges and asides to inject
@@ -111,6 +302,8 @@ HEDGES = [
     " (or something close to it)",
     ", give or take,",
     " — and this matters —",
+    " (roughly speaking)",
+    ", to put it simply,",
 ]
 
 INFORMALITIES = [
@@ -121,6 +314,8 @@ INFORMALITIES = [
     "Let's be real — ",
     "Truth is, ",
     "The reality is pretty straightforward: ",
+    "Fact is, ",
+    "In practice, ",
 ]
 
 SENTENCE_STARTERS_CASUAL = [
@@ -129,33 +324,138 @@ SENTENCE_STARTERS_CASUAL = [
     "So ",
     "Now, ",
     "Thing is, ",
+    "Still, ",
+    "Sure, ",
+]
+
+# Trailing -ing phrases that LLMs attach to end of sentences for fake analysis
+TRAILING_ING_PATTERNS = [
+    r',\s*highlighting\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*underscoring\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*emphasizing\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*reflecting\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*symbolizing\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*contributing\s+to\s+(?:the|its|their|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*fostering\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*showcasing\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*ensuring\s+(?:the|its|their|that|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*reinforcing\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*demonstrating\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*illustrating\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*cultivating\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
+    r',\s*embodying\s+(?:the|its|their|his|her|a)\s+[^.!?]{8,60}[.!?]',
 ]
 
 
 def humanize_text(text):
-    """Apply humanization transforms to AI-generated text."""
-    # Step 1: Replace overused AI transitions
-    for pattern, replacement_fn in TRANSITION_SWAPS.items():
-        text = re.sub(pattern, lambda m: replacement_fn(), text, flags=re.IGNORECASE, count=1)
+    """Apply comprehensive humanization transforms to AI-generated text.
 
-    # Step 2: Replace overused AI vocabulary
+    Pipeline:
+      1. Normalize smart quotes and curly apostrophes
+      2. Remove trailing -ing superficial analysis phrases
+      3. Simplify "not only X but also Y" parallelisms
+      4. Reduce rule-of-three adjective patterns
+      5. Rewrite challenges/prospects formula
+      6. Replace puffery phrases (significance/legacy)
+      7. Replace promotional language
+      8. Replace didactic disclaimers
+      9. Replace vague attributions
+     10. Replace overused AI transitions
+     11. Replace overused AI vocabulary (70% probability)
+     12. Sentence structure manipulation (casual starters, hedges, splits, merges)
+     13. Reduce em dash overuse
+     14. Clean up artifacts
+     15. Introduce contractions
+    """
+
+    # Step 1: Normalize smart/curly quotes → straight quotes
+    text = text.replace('\u201c', '"').replace('\u201d', '"')   # " " → "
+    text = text.replace('\u2018', "'").replace('\u2019', "'")   # ' ' → '
+    text = text.replace('\u2033', '"').replace('\u2032', "'")   # ″ ′ → " '
+
+    # Step 2: Remove trailing -ing superficial analysis phrases
+    # e.g. "The town grew rapidly, highlighting its importance as a trade hub."
+    #   → "The town grew rapidly."
+    for pattern in TRAILING_ING_PATTERNS:
+        if random.random() < 0.85:  # remove 85% of the time
+            # Find the trailing phrase and remove it, keeping the period
+            text = re.sub(pattern, '.', text)
+
+    # Step 3: Simplify "not only X but also Y" → "both X and Y" or "X and Y"
+    def simplify_not_only(m):
+        x_part = m.group(1).strip().rstrip(',')
+        y_part = m.group(2).strip()
+        if random.random() < 0.5:
+            return f"both {x_part} and {y_part}"
+        return f"{x_part} and {y_part}"
+    text = re.sub(
+        r'\b[Nn]ot only\s+(.{3,80}?)\s*,?\s*but\s+also\s+(.{3,80}?)(?=[.,;!?])',
+        simplify_not_only, text, count=3
+    )
+
+    # Step 4: Reduce rule-of-three adjective patterns
+    # e.g. "innovative, creative, and groundbreaking" → "creative and groundbreaking"
+    def reduce_triple(m):
+        a, b, c = m.group(1), m.group(2), m.group(3)
+        if random.random() < 0.6:
+            return random.choice([f"{a} and {c}", f"{b} and {c}", f"{a} and {b}"])
+        return m.group(0)
+    text = re.sub(
+        r'\b(\w+),\s+(\w+),\s+and\s+(\w+)\b',
+        reduce_triple, text, count=5
+    )
+
+    # Step 5: Rewrite "Despite its X, Y faces challenges" formula
+    def rewrite_challenge_formula(m):
+        subject = m.group(1).strip()
+        templates = [
+            f"{subject} still has some problems",
+            f"{subject} isn't without issues",
+            f"{subject} does have some downsides",
+            f"There are still issues with {subject.lower() if subject[0].isupper() else subject}",
+        ]
+        return random.choice(templates)
+    text = re.sub(
+        r'Despite (?:its|their|the) [^,]{5,50},\s*(.{3,40}?)\s+faces?\s+(?:several |numerous |significant )?challenges',
+        rewrite_challenge_formula, text, flags=re.IGNORECASE, count=2
+    )
+
+    # Step 6: Replace puffery phrases (significance/legacy)
+    for pattern, replacement_fn in PUFFERY_SWAPS.items():
+        text = re.sub(pattern, lambda m, fn=replacement_fn: _preserve_case(m, fn()), text, flags=re.IGNORECASE, count=1)
+
+    # Step 7: Replace promotional language
+    for pattern, replacement_fn in PROMOTIONAL_SWAPS.items():
+        text = re.sub(pattern, lambda m, fn=replacement_fn: _preserve_case(m, fn()), text, flags=re.IGNORECASE, count=1)
+
+    # Step 8: Replace didactic disclaimers
+    for pattern, replacement_fn in DIDACTIC_SWAPS.items():
+        text = re.sub(pattern, lambda m, fn=replacement_fn: fn(), text, flags=re.IGNORECASE, count=1)
+
+    # Step 9: Replace vague attributions
+    for pattern, replacement_fn in VAGUE_ATTRIBUTION_SWAPS.items():
+        text = re.sub(pattern, lambda m, fn=replacement_fn: fn(), text, flags=re.IGNORECASE, count=1)
+
+    # Step 10: Replace overused AI transitions
+    for pattern, replacement_fn in TRANSITION_SWAPS.items():
+        text = re.sub(pattern, lambda m, fn=replacement_fn: _preserve_case(m, fn()), text, flags=re.IGNORECASE, count=1)
+
+    # Step 11: Replace overused AI vocabulary (70% probability to keep variation)
     for pattern, replacement_fn in WORD_SWAPS.items():
-        # Only replace ~70% of matches to keep some natural variation
-        def maybe_replace(m):
+        def maybe_replace(m, fn=replacement_fn):
             if random.random() < 0.7:
-                replacement = replacement_fn()
-                # Preserve capitalization
+                replacement = fn()
                 if m.group(0)[0].isupper():
                     return replacement[0].upper() + replacement[1:]
                 return replacement
             return m.group(0)
         text = re.sub(pattern, maybe_replace, text, flags=re.IGNORECASE)
 
-    # Step 3: Split into sentences for structural manipulation
+    # Step 12: Split into sentences for structural manipulation
     sentences = re.split(r'(?<=[.!?])\s+', text)
 
     if len(sentences) < 2:
-        return text
+        return _finalize(text)
 
     new_sentences = []
     for i, sent in enumerate(sentences):
@@ -163,23 +463,22 @@ def humanize_text(text):
         if not sent:
             continue
 
-        # Occasionally start with casual connector (15% chance, not first sentence)
+        # Occasionally start with casual connector (15% chance, not first/last)
         if i > 0 and i < len(sentences) - 1 and random.random() < 0.15:
             starter = random.choice(SENTENCE_STARTERS_CASUAL)
-            # Lowercase the first letter of the existing sentence
             if sent and sent[0].isupper():
                 sent = starter + sent[0].lower() + sent[1:]
 
-        # Inject a hedge/aside into ~12% of longer sentences
-        if len(sent.split()) > 12 and random.random() < 0.12:
+        # Inject a hedge/aside into ~10% of longer sentences
+        if len(sent.split()) > 12 and random.random() < 0.10:
             words = sent.split()
             insert_pos = len(words) // 2
             hedge = random.choice(HEDGES)
             words.insert(insert_pos, hedge)
             sent = ' '.join(words)
 
-        # Add informality opener to ~8% of sentences (not first)
-        if i > 1 and random.random() < 0.08 and not any(sent.startswith(s) for s in SENTENCE_STARTERS_CASUAL):
+        # Add informality opener to ~7% of sentences (not first)
+        if i > 1 and random.random() < 0.07 and not any(sent.startswith(s) for s in SENTENCE_STARTERS_CASUAL):
             informal = random.choice(INFORMALITIES)
             if sent and sent[0].isupper():
                 sent = informal + sent[0].lower() + sent[1:]
@@ -207,16 +506,36 @@ def humanize_text(text):
 
         new_sentences.append(sent)
 
-    # Step 4: Vary paragraph structure
-    # Join and re-split by paragraphs
     result = ' '.join(new_sentences)
 
-    # Step 5: Clean up artifacts
-    result = re.sub(r'\s{2,}', ' ', result)
+    # Step 13: Reduce em dash overuse — convert some to commas or parens
+    em_dashes = list(re.finditer(r'\s*—\s*', result))
+    if len(em_dashes) > 3:
+        # Too many em dashes, convert some to commas
+        for match in em_dashes[2:]:
+            if random.random() < 0.6:
+                result = result[:match.start()] + ', ' + result[match.end():]
+
+    return _finalize(result)
+
+
+def _preserve_case(match, replacement):
+    """Preserve the capitalization pattern of the matched text."""
+    original = match.group(0)
+    if original[0].isupper() and replacement[0].islower():
+        return replacement[0].upper() + replacement[1:]
+    return replacement
+
+
+def _finalize(text):
+    """Clean up artifacts and introduce contractions."""
+    # Clean up artifacts
+    result = re.sub(r'\s{2,}', ' ', text)
     result = re.sub(r'\s([.,!?])', r'\1', result)
     result = re.sub(r'\.{2,}', '.', result)
+    result = re.sub(r'\s*—\s*—\s*', ' — ', result)  # double em dash cleanup
 
-    # Step 6: Randomly add a contraction or two
+    # Introduce contractions
     contraction_map = {
         "It is ": ["It's ", 0.6],
         "it is ": ["it's ", 0.6],
@@ -246,12 +565,21 @@ def humanize_text(text):
         "we are ": ["we're ", 0.5],
         "they are ": ["they're ", 0.5],
         "you are ": ["you're ", 0.5],
+        "I will ": ["I'll ", 0.5],
+        "we will ": ["we'll ", 0.4],
+        "they will ": ["they'll ", 0.4],
+        "it will ": ["it'll ", 0.3],
+        "who is ": ["who's ", 0.4],
+        "what is ": ["what's ", 0.5],
+        "that would ": ["that'd ", 0.3],
+        "who would ": ["who'd ", 0.3],
     }
     for formal, (contraction, prob) in contraction_map.items():
         if random.random() < prob:
             result = result.replace(formal, contraction, 1)
 
     return result.strip()
+
 
 
 # ─── Detector Backends ────────────────────────────────────────────────────────
